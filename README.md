@@ -81,6 +81,18 @@ Plug the display into one of the Spark's USB-C ports first. The installer:
 Within a couple of seconds the screen reads **ONLINE · via USB**. The installer is
 safe to re-run. It never overwrites a setting you didn't ask it to change.
 
+### Updating
+
+```bash
+cd SparkESP32
+git pull                      # or pin a release: git fetch --tags && git checkout v1.0.1
+sudo ./install.sh --yes
+```
+
+The installer updates the agent, and flashes the board when it runs an older version.
+The board keeps its name, Wi-Fi and rotation. Release notes are in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Configuring
 
 All settings live in the board's flash. They survive power cycles and firmware updates.
