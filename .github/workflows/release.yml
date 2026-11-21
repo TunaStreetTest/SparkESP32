@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Tag must match VERSION
+        run: |
+          want="v$(head -n1 VERSION)"
+          [ "$GITHUB_REF_NAME" = "$want" ] || { echo "tag $GITHUB_REF_NAME != $want (VERSION)"; exit 1; }
+
+      - name: Build firmware and release bundle
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32c6
+          command: make dist
+
+      - name: Verify the bundle install.sh will download
+        run: |
+          v="$(head -n1 VERSION)"
+          tar -tzf "dist/sparkesp32-firmware-$v.tar.gz"
+          mkdir -p /tmp/verify && tar -xzf "dist/sparkesp32-firmware-$v.tar.gz" -C /tmp/verify
+          (cd "/tmp/verify/sparkesp32-firmware-$v" && sha256sum -c SHA256SUMS)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="$(head -n1 VERSION)"
+          flags=(--verify-tag --generate-notes --title "SparkESP32 $v")
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
+            "dist/sparkesp32-firmware-$v.tar.gz" \
+            "dist/sparkesp32-$v-merged.bin" \
+            dist/SHA256SUMS

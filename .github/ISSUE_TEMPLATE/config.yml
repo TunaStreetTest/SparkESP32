@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/twidtwid/SparkESP32/security/advisories/new
+    about: Report security-sensitive problems privately.
+  - name: Troubleshooting guide
+    url: https://github.com/twidtwid/SparkESP32/blob/main/docs/troubleshooting.md
+    about: Most "OFFLINE", "NO WI-FI" and "WAITING" questions are answered here.

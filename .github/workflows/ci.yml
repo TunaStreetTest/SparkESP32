@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Tests and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install linters and pyserial
+        run: python -m pip install --disable-pip-version-check ruff pyserial==3.5
+      - name: make check
+        run: make check
+
+  firmware:
+    name: Firmware (ESP-IDF v5.5.3, esp32c6)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build firmware and release bundle
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32c6
+          command: make dist
+      - name: Upload firmware bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: sparkesp32-firmware
+          path: dist/
+          if-no-files-found: error

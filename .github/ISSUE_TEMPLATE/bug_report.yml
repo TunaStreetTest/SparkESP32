@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Don't include Wi-Fi passwords, your network's hostnames or IP addresses, or other private data.
+        [docs/troubleshooting.md](https://github.com/twidtwid/SparkESP32/blob/main/docs/troubleshooting.md) covers the common cases.
+
+  - type: input
+    id: version
+    attributes:
+      label: SparkESP32 version
+      description: '`"version"` from `curl -s localhost:8787/healthz` on the Spark'
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: screen
+    attributes:
+      label: What the screen says
+      description: The state in the top-right corner, and "via USB" / "via WI-FI" if shown
+      placeholder: OFFLINE
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How is the display connected?
+      options:
+        - USB-C to the Spark
+        - Wi-Fi
+        - Both / switching between them
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: Spark model / OS version (`cat /etc/os-release | head -2`), or the other Linux machine you're using
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Observed and expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Paste (redacted) output of:
+        `curl -s localhost:8787/healthz`,
+        `journalctl -u sparkesp32 -n 30 --no-pager`,
+        and, if you can, `python3 tools/devctl.py status` and `python3 tools/devctl.py wifi`.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed passwords, addresses and other private data from this report.
+          required: true
