@@ -70,6 +70,12 @@ wifi configured=1 connected=1 url=1
 STATUS-END
 ```
 
+**Ask more than once.** The serial port appears the moment the board is plugged in or
+reset, about 2 s before its console is running, and the console's terminal probe (IDF's
+`linenoiseProbe`) then discards everything typed in its first 0.5 s. A single `status`
+sent to a board that's still booting just vanishes. Resend it every second or two until it
+answers; the agent and `tools/sparklink.py` keep trying for 10 s.
+
 A sample over USB counts as fresh for 3 s. While it's fresh, the board skips its Wi-Fi poll.
 
 **Keep every console line under 256 bytes.** ESP-IDF's console line editor (linenoise,

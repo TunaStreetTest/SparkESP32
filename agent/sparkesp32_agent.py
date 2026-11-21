@@ -17,6 +17,7 @@ the host are never written to. Installed by install.sh as a systemd service.
 import argparse
 import json
 import logging
+import os
 import signal
 import socket
 import subprocess
@@ -36,7 +37,9 @@ log = logging.getLogger("sparkesp32")
 
 USB_VID, USB_PID = 0x303A, 0x1001     # Espressif USB-Serial/JTAG (ESP32-C6 native USB)
 HANDSHAKE = b"fw=sparkesp32"
-STALE_S = 5.0                         # /stat answers 503 if the sampler is older than this
+HANDSHAKE_S = 10.0                    # keep asking a just-plugged-in board this long: it's still
+                                      # booting, then its console drops input for 0.5 s
+STALE_S = 5.0                        # /stat answers 503 if the sampler is older than this
 MAX_CORES = 32                        # what the display shows; also keeps a line < 256 bytes,
                                       # the firmware console's line buffer
 GPU_STALE_S = 5.0                     # nvidia-smi values older than this are reported unknown
@@ -251,17 +254,22 @@ def candidate_ports():
                   if p.vid == USB_VID and p.pid == USB_PID)
 
 
-def handshake(ser, timeout=3.0):
-    """True if the device on `ser` is a SparkESP32 (answers status with fw=sparkesp32)."""
+def handshake(ser, timeout=HANDSHAKE_S, every=1.0):
+    """True if the device on `ser` is a SparkESP32 (answers status with fw=sparkesp32).
+
+    Asks again every `every` seconds: the port appears the moment the board is
+    plugged in, before its console exists, and the console's terminal probe
+    (IDF linenoiseProbe) then throws away everything typed in its first 0.5 s.
+    """
     ser.reset_input_buffer()
-    ser.write(b"\nstatus\n")
-    buf, deadline = b"", time.monotonic() + timeout
+    buf, deadline, ask_at = b"", time.monotonic() + timeout, 0.0
     while time.monotonic() < deadline:
-        buf += ser.read(256)
+        if time.monotonic() >= ask_at:
+            ser.write(b"\nstatus\n")
+            ask_at = time.monotonic() + every
+        buf = (buf + ser.read(256))[-4096:]
         if HANDSHAKE in buf:
             return True
-        if b"STATUS-END" in buf:
-            return False
     return False
 
 
@@ -272,6 +280,8 @@ def serial_loop(sampler, explicit_port, status, stop):
         try:
             if ser is None:
                 now = time.monotonic()
+                # unplugging forgets a rejection, so a replug is always retried at once
+                rejected = {p: t for p, t in rejected.items() if os.path.exists(p)}
                 ports = [explicit_port] if explicit_port else candidate_ports()
                 ports = [p for p in ports if rejected.get(p, 0) < now]
                 if not ports:
@@ -279,13 +289,14 @@ def serial_loop(sampler, explicit_port, status, stop):
                     continue
                 port = ports[0]
                 ser = serial.Serial(port, 115200, timeout=0.2, write_timeout=1)
+                t0 = time.monotonic()
                 if not handshake(ser):
                     log.warning("%s is an Espressif USB device but not a SparkESP32; ignoring it "
-                                "for 5 minutes", port)
+                                "for 5 minutes or until it's replugged", port)
                     ser.close()
                     ser, rejected[port] = None, now + 300
                     continue
-                log.info("display connected on %s", port)
+                log.info("display connected on %s (answered in %.1fs)", port, time.monotonic() - t0)
                 status.set(f"connected on {port}")
             line, at, _ = sampler.latest()
             if line and at != last_at:

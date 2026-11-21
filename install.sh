@@ -210,7 +210,7 @@ else
             write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0 "$FW/bootloader.bin" 0x8000 "$FW/partition-table.bin" 0x10000 "$FW/sparkesp32.bin" \
             || die "flashing failed; hold BOOT while plugging in the board, then re-run"
-        for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 1; read_status; [ -n "$DEV_STATUS" ] && break; done
+        for _ in 1 2 3; do sleep 1; read_status; [ -n "$DEV_STATUS" ] && break; done   # each try waits 10 s
         [ -n "$DEV_STATUS" ] || die "the board didn't answer after flashing"
     else
         say "board already runs $VERSION"

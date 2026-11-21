@@ -17,6 +17,7 @@ except ImportError:
 
 USB_VID, USB_PID = 0x303A, 0x1001          # Espressif USB-Serial/JTAG (ESP32-C6 native USB)
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ESP_LOG = re.compile(r"[EWIDV] \(\d+\) ")   # "I (4378) tag: ...": the board logging, never a reply
 PROMPT = "spark>"
 
 # the line that ends each command's reply
@@ -88,8 +89,8 @@ class Link:
         for ln in clean_lines(buf):
             s = ln.strip()
             # the console echoes what it's sent; never treat that echo as the reply
-            if not s or s == cmd.strip() or s.startswith("Command returned non-zero"):
-                continue   # ^ esp_console's footer after our own ERR line
+            if not s or s == cmd.strip() or s.startswith("Command returned non-zero") or ESP_LOG.match(s):
+                continue   # ^ esp_console's footer after our own ERR line; log lines from other tasks
             out.append("ERR unrecognized command" if s == "Unrecognized command" else ln)
         return out
 
@@ -112,13 +113,25 @@ class Link:
             raise LinkError(last or f"no OK from '{cmd.split()[0]}'")
         return lines
 
-    def handshake(self):
-        """Return the status lines; raise LinkError unless this is SparkESP32 firmware."""
-        lines = self.cmd("status", timeout=5)
-        fw = next((ln for ln in lines if ln.startswith("fw=")), "")
-        if not fw.startswith("fw=sparkesp32"):
-            raise LinkError(f"{self.port} is not running SparkESP32 firmware")
-        return lines
+    def handshake(self, timeout=10.0, attempt=2.0):
+        """Return the status lines; raise LinkError unless this is SparkESP32 firmware.
+
+        Keeps asking for `timeout` seconds: a board that was just plugged in or
+        reset is still booting, and its console's terminal probe (IDF
+        linenoiseProbe) throws away everything typed in its first 0.5 s.
+        """
+        deadline, why = time.monotonic() + timeout, None
+        while True:
+            try:
+                lines = self.cmd("status", timeout=attempt)
+                if any(ln.startswith("fw=sparkesp32") for ln in lines):
+                    return lines
+                why = f"{self.port} is not running SparkESP32 firmware"
+            except LinkError:
+                pass
+            if time.monotonic() >= deadline:
+                raise LinkError(why or f"{self.port} didn't answer 'status' within {timeout:.0f}s: "
+                                       "is it running SparkESP32 firmware?")
 
 
 def connect(port=None):

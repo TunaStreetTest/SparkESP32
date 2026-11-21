@@ -25,3 +25,9 @@ First public release.
   `tools/devctl.py` for QA and CRC-checked screenshots.
 - Tests: the firmware's protocol parser runs on the host, along with the agent,
   the serial tools and screenshot reassembly.
+- Works around an ESP32-C6 USB erratum ([espressif/esp-idf#17432](https://github.com/espressif/esp-idf/issues/17432)):
+  a power-on boot can leave the USB serial link dead until the chip is reset, so the
+  firmware restarts its CPU once at power-on. The host keeps the port through that restart.
+- The agent and host tools keep asking `status` for 10 s, since a board that was just
+  plugged in only answers once its console is up, about 2 s after boot. Replugging a
+  board the agent gave up on makes it try again at once.

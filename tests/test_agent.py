@@ -186,6 +186,40 @@ class FakeSerial:
         pass
 
 
+class BootingBoard:
+    """A display whose console ignores its first `deaf` writes, like one still booting."""
+
+    def __init__(self, deaf, fw=b"fw=sparkesp32 version=0.1.0"):
+        self.deaf, self.fw, self.out, self.writes = deaf, fw, b"", 0
+
+    def reset_input_buffer(self):
+        self.out = b""
+
+    def write(self, data):
+        self.writes += 1
+        if self.writes > self.deaf:
+            self.out += b"STATUS-BEGIN\r\n" + self.fw + b"\r\nSTATUS-END\r\n"
+
+    def read(self, n):
+        chunk, self.out = self.out[:n], self.out[n:]
+        if not chunk:
+            time.sleep(0.005)
+        return chunk
+
+
+class AgentHandshakeTest(unittest.TestCase):
+    def test_asks_again_while_the_board_boots(self):
+        board = BootingBoard(deaf=3)
+        self.assertTrue(agent.handshake(board, timeout=2, every=0.05))
+        self.assertEqual(board.writes, 4)
+
+    def test_rejects_other_firmware(self):
+        self.assertFalse(agent.handshake(BootingBoard(deaf=0, fw=b"fw=other"), timeout=0.3, every=0.05))
+
+    def test_rejects_a_silent_device(self):
+        self.assertFalse(agent.handshake(BootingBoard(deaf=10**6), timeout=0.3, every=0.05))
+
+
 def link_with(replies):
     link = sparklink.Link.__new__(sparklink.Link)
     link.port, link.ser = "/dev/fake", FakeSerial(replies)
@@ -216,8 +250,28 @@ class LinkTest(unittest.TestCase):
         good = link_with(lambda c: "STATUS-BEGIN\r\nfw=sparkesp32 version=0.1.0 idf=v5.5.6\r\nSTATUS-END\r\n")
         self.assertTrue(any(ln.startswith("fw=") for ln in good.handshake()))
         bad = link_with(lambda c: "STATUS-BEGIN\r\nfw=other\r\nSTATUS-END\r\n")
-        with self.assertRaises(sparklink.LinkError):
-            bad.handshake()
+        with self.assertRaises(sparklink.LinkError) as e:
+            bad.handshake(timeout=0.2, attempt=0.05)
+        self.assertIn("not running SparkESP32", str(e.exception))
+
+    def test_handshake_asks_again_while_the_board_boots(self):
+        calls = []
+
+        def booting(c):                    # the first two vanish, as they do mid-boot
+            calls.append(c)
+            return "" if len(calls) < 3 else "STATUS-BEGIN\r\nfw=sparkesp32 version=0.1.0\r\nSTATUS-END\r\n"
+        self.assertTrue(link_with(booting).handshake(timeout=2, attempt=0.05))
+        self.assertEqual(len(calls), 3)
+
+    def test_handshake_gives_up_on_a_silent_port(self):
+        with self.assertRaises(sparklink.LinkError) as e:
+            link_with(lambda c: "").handshake(timeout=0.2, attempt=0.05)
+        self.assertIn("didn't answer", str(e.exception))
+
+    def test_board_log_lines_are_not_the_reply(self):
+        link = link_with(lambda c: "configured=1 connected=0\r\n I (4378) net: joined 'x'\r\n"
+                                   "E (5184) esp-tls: delayed connect error\r\nNET-END\r\n")
+        self.assertEqual(link.cmd("wifi show"), ["configured=1 connected=0", "NET-END"])
 
     def test_unrecognized_command_is_an_error(self):
         link = link_with(lambda c: "Unrecognized command\r\n")

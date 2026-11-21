@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
 
 #include "board.h"
 #include "console_cmds.h"
@@ -43,6 +44,15 @@ static display_rot_t saved_rotation(void)
 
 void app_main(void)
 {
+    // ESP32-C6 erratum (espressif/esp-idf#17432): a power-on boot that races the
+    // host enumerating the USB port can leave the USB-Serial/JTAG link dead, with
+    // no bytes either way, until the chip is reset. A CPU reset after enumeration
+    // always brings it up and never breaks it, and esp_restart() on the C6 resets
+    // only the CPU, so the host keeps the port. Restart once per power-on (~0.5 s).
+    if (esp_reset_reason() == ESP_RST_POWERON) {
+        esp_restart();
+    }
+
     ESP_ERROR_CHECK(settings_init());
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(display_start(saved_rotation()));

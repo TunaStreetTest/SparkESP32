@@ -39,8 +39,10 @@ Nothing has arrived over USB yet.
     program has the port open (`screen`, `minicom`, `devctl.py`, an IDE monitor)
     with `sudo fuser -v /dev/ttyACM*`. Then re-run `sudo ./install.sh`, which also
     reflashes if the board isn't running SparkESP32.
-  - The log says `is an Espressif USB device but not a SparkESP32`: the board answered
-    the handshake with different firmware. Re-run `sudo ./install.sh` to flash it.
+  - The log says `is an Espressif USB device but not a SparkESP32`: the board didn't
+    answer the handshake as SparkESP32 within 10 s. Unplug it and plug it back in (the
+    agent retries a replugged board at once). If it still says that, it's running
+    different firmware: re-run `sudo ./install.sh` to flash it.
 - ModemManager probing the port garbles the console. The installer's udev rule stops that.
   Check it's present: `cat /etc/udev/rules.d/99-sparkesp32.rules`.
 
