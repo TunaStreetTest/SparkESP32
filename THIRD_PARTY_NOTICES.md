@@ -17,10 +17,10 @@ Fetched at build time by the ESP-IDF component manager (pinned in
 
 | Project | Version | License |
 |---|---|---|
-| [ESP-IDF](https://github.com/espressif/esp-idf) (Espressif) | 5.5.3 | Apache-2.0. Its bundled components (FreeRTOS, lwIP, mbedTLS, newlib, wpa_supplicant and others) carry their own permissive licenses, listed in [ESP-IDF's copyright notice](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c6/COPYRIGHT.html) |
+| [ESP-IDF](https://github.com/espressif/esp-idf) (Espressif) | 5.5.6 | Apache-2.0. Its bundled components (FreeRTOS, lwIP, mbedTLS, newlib, wpa_supplicant and others) carry their own permissive licenses, listed in [ESP-IDF's copyright notice](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32c6/COPYRIGHT.html) |
 | [LVGL](https://github.com/lvgl/lvgl) | 9.6.0 | MIT |
-| [esp_lvgl_adapter](https://components.espressif.com/components/espressif/esp_lvgl_adapter) (Espressif) | 0.3.2 | Apache-2.0 |
-| [esp_lcd_sh8601](https://components.espressif.com/components/espressif/esp_lcd_sh8601) (Espressif) | 1.0.0 | Apache-2.0 |
+| [esp_lvgl_adapter](https://components.espressif.com/components/espressif/esp_lvgl_adapter) (Espressif) | 0.7.9 | Apache-2.0 |
+| [esp_lcd_sh8601](https://components.espressif.com/components/espressif/esp_lcd_sh8601) (Espressif) | 2.0.1 | Apache-2.0 |
 
 The adapter also pulls in, as build-time dependencies, Espressif's `esp_lv_fs`,
 `esp_lv_decoder`, `esp_mmap_assets`, `button`, `knob`, `esp_lcd_touch`, `esp_new_jpeg`

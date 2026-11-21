@@ -34,6 +34,11 @@ static void rotate_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_
         s_panel_flush(d, area, px_map);
         return;
     }
+    // LVGL may pad draw-buffer rows (LV_DRAW_BUF_STRIDE_ALIGN): walk the
+    // source at its real stride, not at w.
+    lv_draw_buf_t *db = d->buf_act;
+    int src_stride = db ? (int)(db->header.stride / 2) : w;
+    if (src_stride < w) src_stride = w;
     const uint16_t *src = (const uint16_t *)px_map;
     lv_area_t out;
     if (s_rot == DISPLAY_ROT_CCW) {
@@ -43,7 +48,7 @@ static void rotate_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_
         out.y1 = (L - 1) - area->x2;
         out.y2 = (L - 1) - area->x1;
         for (int y = 0; y < h; y++) {
-            const uint16_t *row = src + y * w;
+            const uint16_t *row = src + y * src_stride;
             uint16_t *col = s_rot_buf + y;
             for (int x = 0; x < w; x++) col[(w - 1 - x) * h] = row[x];
         }
@@ -54,12 +59,24 @@ static void rotate_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_
         out.y1 = area->x1;
         out.y2 = area->x2;
         for (int y = 0; y < h; y++) {
-            const uint16_t *row = src + y * w;
+            const uint16_t *row = src + y * src_stride;
             uint16_t *col = s_rot_buf + (h - 1 - y);
             for (int x = 0; x < w; x++) col[x * h] = row[x];
         }
     }
-    s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
+    // esp_lvgl_adapter >= 0.7 compacts each strip in place using the draw
+    // buffer's stride before sending it. Our rotated strip is tightly packed
+    // at the *rotated* width (h pixels), so report that stride for the
+    // hand-off and restore LVGL's afterwards. The adapter reads it
+    // synchronously, before this call returns.
+    if (db) {
+        uint32_t saved = db->header.stride;
+        db->header.stride = (uint32_t)h * 2;
+        s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
+        db->header.stride = saved;
+    } else {
+        s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
+    }
 }
 
 // The SH8601 needs window starts on even and ends on odd coordinates. With

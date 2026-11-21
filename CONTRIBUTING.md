@@ -17,7 +17,7 @@ Requirements:
 
 - python3 (3.10+) and a C compiler for `make check`. Nothing else is needed for
   the agent, tools and tests.
-- [ESP-IDF v5.5.x](https://docs.espressif.com/projects/esp-idf/en/v5.5.3/esp32c6/get-started/)
+- [ESP-IDF v5.5.x](https://docs.espressif.com/projects/esp-idf/en/v5.5.6/esp32c6/get-started/)
   with the esp32c6 target, for firmware.
 - The Waveshare ESP32-C6-Touch-AMOLED-2.16, for anything you want to see on the screen.
 

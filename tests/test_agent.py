@@ -213,7 +213,7 @@ class LinkTest(unittest.TestCase):
         self.assertNotIn("s3cret", " ".join(lines))
 
     def test_handshake(self):
-        good = link_with(lambda c: "STATUS-BEGIN\r\nfw=sparkesp32 version=0.1.0 idf=v5.5.3\r\nSTATUS-END\r\n")
+        good = link_with(lambda c: "STATUS-BEGIN\r\nfw=sparkesp32 version=0.1.0 idf=v5.5.6\r\nSTATUS-END\r\n")
         self.assertTrue(any(ln.startswith("fw=") for ln in good.handshake()))
         bad = link_with(lambda c: "STATUS-BEGIN\r\nfw=other\r\nSTATUS-END\r\n")
         with self.assertRaises(sparklink.LinkError):

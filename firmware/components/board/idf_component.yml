@@ -1,5 +1,5 @@
 dependencies:
-  idf: ">=5.4"
-  espressif/esp_lcd_sh8601: "^1.0.0"
-  espressif/esp_lvgl_adapter: "^0.3.0"
+  idf: ">=5.5.5"
+  espressif/esp_lcd_sh8601: "^2.0.1"
+  espressif/esp_lvgl_adapter: "^0.7.9"
   lvgl/lvgl: "^9.6.0"
