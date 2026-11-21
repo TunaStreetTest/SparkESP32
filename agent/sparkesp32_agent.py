@@ -37,6 +37,8 @@ log = logging.getLogger("sparkesp32")
 USB_VID, USB_PID = 0x303A, 0x1001     # Espressif USB-Serial/JTAG (ESP32-C6 native USB)
 HANDSHAKE = b"fw=sparkesp32"
 STALE_S = 5.0                         # /stat answers 503 if the sampler is older than this
+MAX_CORES = 32                        # what the display shows; also keeps a line < 256 bytes,
+                                      # the firmware console's line buffer
 GPU_STALE_S = 5.0                     # nvidia-smi values older than this are reported unknown
 NVSMI = ["nvidia-smi", "-i", "0", "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
          "--format=csv,noheader,nounits", "-lms", "1000"]
@@ -174,7 +176,7 @@ class Sampler:
         cur = read_cpu_times()
         cpu = pct(self._prev[0], cur[0])
         # cores hot-plugged/offlined between reads -> only compare what lines up
-        cores = [pct(p, c) for p, c in zip(self._prev[1:], cur[1:], strict=False)]
+        cores = [pct(p, c) for p, c in zip(self._prev[1:], cur[1:], strict=False)][:MAX_CORES]
         self._prev = cur
         memu, memt = read_mem_mb()
         gpu, temp, pow_dw = self.gpu.latest()

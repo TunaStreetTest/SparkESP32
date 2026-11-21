@@ -72,6 +72,12 @@ STATUS-END
 
 A sample over USB counts as fresh for 3 s. While it's fresh, the board skips its Wi-Fi poll.
 
+**Keep every console line under 256 bytes.** ESP-IDF's console line editor (linenoise,
+in the "dumb terminal" mode a program talking to it gets) reads into a 256-byte buffer.
+A line that fills it isn't terminated, and the rest of it is read as a second
+command. That's an upstream limitation. The agent stays well clear by sending at most 32
+per-core values (all the heatmap shows), which bounds a `stat` line at about 240 bytes.
+
 ## HTTP transport
 
 The agent serves, on port 8787 by default:

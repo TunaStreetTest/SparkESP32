@@ -74,6 +74,17 @@ class SamplerTest(unittest.TestCase):
         s.tick()
         self.assertEqual(s.latest()[0], "stat 100 - 46328 130661 - - 50 " + agent.short_hostname())
 
+    def test_big_machine_line_fits_the_console_buffer(self):
+        # 144 cores, every value 3 digits, a 63-char hostname: worst case
+        n = 144
+        s = self.make(FakeGpu((100, 150, 100000)),
+                      [[(0, 0)] * (n + 1), [(0, 100)] * (n + 1)], mem=(2**31 - 1, 2**31 - 1))
+        s.host = "h" * 63
+        s.tick()
+        line = s.latest()[0]
+        self.assertEqual(len(line.split()[7].split(",")), agent.MAX_CORES)
+        self.assertLess(len(line) + 1, 256)       # + "\n"; firmware console buffer is 256
+
     def test_core_count_change_compares_only_matching_cores(self):
         s = self.make(FakeGpu(), [[(0, 0), (0, 0), (0, 0)], [(0, 100), (0, 100)]])
         s.tick()
