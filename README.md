@@ -1,6 +1,6 @@
 # SparkESP32
 
-**A status display and power light for the NVIDIA DGX Spark, on a $30 ESP32 AMOLED board.**
+**A status display and power light for the NVIDIA DGX Spark, on an ESP32 AMOLED board that costs under $40.**
 
 The DGX Spark has no power LED and nothing on the outside that tells you what it's doing.
 SparkESP32 puts a 2.16" 480×480 AMOLED next to it that shows CPU, GPU and unified-memory
@@ -24,12 +24,40 @@ state that doubles as the power light.
 
 | | |
 |---|---|
-| Display | [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm) (SKU 34202 or 34201). Other boards won't work without porting `firmware/components/board`. |
+| Display | [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm) (SKU 34202 or 34201), the recommended board. See [Supported boards](#supported-boards) for the others. |
 | Cable | USB-C to USB-C **data** cable (some charge-only cables won't enumerate) |
 | Host | A DGX Spark (DGX OS / Ubuntu 24.04, aarch64). Any Linux box with an NVIDIA GPU should work too; that's untested. |
 
 No ESP-IDF install is needed. The installer flashes prebuilt firmware from this repo's
 releases.
+
+### Supported boards
+
+| Board | |
+|---|---|
+| [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm) | **Recommended.** 2.16" 480×480 color AMOLED. The reference board: everything here is shown and tested on it. |
+| [LCDWiki 2.8inch ESP32-S3 Display](https://www.lcdwiki.com/2.8inch_ESP32-S3_Display) (ES3C28P) | 2.8" 240×320 color IPS TFT, landscape. A cheap, common board; same features in a compact layout. |
+| [Waveshare ESP32-S3-RLCD-4.2](https://www.waveshare.com/esp32-s3-rlcd-4.2.htm) | 4.2" black-and-white reflective LCD, landscape, no backlight. Same features in a bold mono layout. |
+
+<p>
+  <img src="assets/boards/waveshare-esp32c6-amoled-2.16.png" alt="C6 AMOLED demo screen, 480x480" height="200">
+  <img src="assets/boards/lcdwiki-esp32s3-tft-2.8.png" alt="ES3C28P demo screen, 320x240 color" height="200">
+  <img src="assets/boards/waveshare-esp32s3-rlcd-4.2.png" alt="RLCD-4.2 demo screen, 400x300 black and white" height="200">
+</p>
+
+The same demo data on each board (`tools/devctl.py demoshot`; the RLCD's is what its
+1-bit panel shows).
+
+The installer recognizes the board from its firmware or its chip and flashes the right
+image. Both S3 boards have the same chip, so a brand-new S3 board needs its id once:
+`sudo ./install.sh --board lcdwiki-esp32s3-tft-2.8` or
+`sudo ./install.sh --board waveshare-esp32s3-rlcd-4.2`.
+
+**Your board isn't here?** If it has an ESP32-C3, C5, C6 or S3 with native USB and a
+screen LVGL can drive, it can probably be ported: `tools/new_board.py` starts one from
+the closest board above, and
+[docs/adding-a-device.md](docs/adding-a-device.md) walks through the rest. To get it
+into this repo, see [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-new-device).
 
 ## Quick start (on the Spark)
 
@@ -64,13 +92,14 @@ sudo ./install.sh --name ""                   # back to the Spark's hostname (th
 sudo ./install.sh --ssids "HomeNet"           # join Wi-Fi; password prompted, hidden
 sudo ./install.sh --ssids "HomeNet,HomeNet-IoT"   # several, tried in order (max 4)
 sudo ./install.sh --host 192.168.1.50         # what the board polls over Wi-Fi
-sudo ./install.sh --rotation ccw              # none | ccw | cw (default cw: USB-C on the right)
+sudo ./install.sh --rotation ccw              # none | ccw | cw (default cw: the board's upright
+                                              # position; landscape-only boards take ccw or cw)
 sudo ./install.sh --clear-wifi                # forget Wi-Fi; USB keeps working
 ```
 
 **Wi-Fi notes**
 
-- The ESP32-C6 is **2.4 GHz only**. If your router splits bands, use the 2.4 GHz name.
+- The ESP32-C6 and ESP32-S3 are **2.4 GHz only**. If your router splits bands, use the 2.4 GHz name.
   WPA2 and WPA3 both work. Captive portals and enterprise (802.1X) networks don't.
 - The board finds the Spark by name (`<hostname>.local`, via the Spark's avahi/mDNS). If
   that doesn't resolve on your network, use `--host <ip>` and give the Spark a DHCP
@@ -87,9 +116,10 @@ pip install pyserial
 python3 tools/provision.py --name "Lab Spark" --host spark-1234.local --ssids "HomeNet"
 ```
 
-To flash a board from a computer, download `sparkesp32-firmware-<version>.tar.gz` from
-[Releases](https://github.com/twidtwid/SparkESP32/releases) and run
-`python3 -m esptool --chip esp32c6 write_flash @flash_args` inside the unpacked folder.
+To flash a board from a computer, download `sparkesp32-<board>-firmware-<version>.tar.gz`
+for your board from [Releases](https://github.com/twidtwid/SparkESP32/releases) and run
+`python3 -m esptool write_flash @flash_args` inside the unpacked folder. esptool refuses
+an image built for a different chip.
 The release also has a single merged image for browser flashers like
 [ESP Web Tool](https://espressif.github.io/esptool-js/). Use the merged image only on a
 board you haven't set up yet, because it erases the saved settings.
@@ -150,15 +180,43 @@ journalctl -u sparkesp32 -n 50       # why not?
 ## Development
 
 ```bash
-make check        # unit tests (agent, serial tools, firmware parser on the host), ruff, shellcheck
+make check        # unit tests (agent, serial tools, firmware parser and state machines
+                  # on the host), board checks, ruff, shellcheck
 make build        # firmware; needs ESP-IDF v5.5.x exported (. ~/esp/esp-idf/export.sh)
+make build BOARD=waveshare-esp32s3-rlcd-4.2   # another board (make boards lists them)
 make flash PORT=/dev/ttyACM0
-make dist         # release bundle in dist/
+make dist         # every board's release bundle in dist/
 python3 tools/devctl.py demoshot shot.png 70   # synthetic load + CRC-checked screenshot
 ```
 
 Repo map, conventions and the release process are in [AGENTS.md](AGENTS.md) and
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits
+
+SparkESP32 is a small layer on top of a lot of other people's work. Thank you to:
+
+- [ESP-IDF](https://github.com/espressif/esp-idf) and Espressif's display components,
+  [esp_lvgl_adapter](https://components.espressif.com/components/espressif/esp_lvgl_adapter),
+  [esp_lcd_sh8601](https://components.espressif.com/components/espressif/esp_lcd_sh8601) and
+  [esp_lcd_ili9341](https://components.espressif.com/components/espressif/esp_lcd_ili9341):
+  the firmware's foundation, and [esptool](https://github.com/espressif/esptool), which
+  flashes it.
+- [LVGL](https://github.com/lvgl/lvgl), which draws every screen, with the
+  [Montserrat](https://github.com/JulietaUla/Montserrat) typeface and
+  [Font Awesome](https://fontawesome.com) glyphs.
+- [XPowersLib](https://github.com/lewisxhe/XPowersLib) by Lewis He, which drives the C6
+  board's power chip.
+- [pySerial](https://github.com/pyserial/pyserial), which the agent and every host tool
+  use to talk to the board.
+- [Waveshare](https://www.waveshare.com) and [LCDWiki](https://www.lcdwiki.com) for
+  publishing schematics, pin tables and example code for their boards, and the
+  [Zephyr Project](https://github.com/zephyrproject-rtos/zephyr/tree/main/boards/waveshare/esp32s3_rlcd_4_2)
+  for its RLCD-4.2 board definition.
+- The reporters of [espressif/esp-idf#17432](https://github.com/espressif/esp-idf/issues/17432),
+  whose analysis of the ESP32-C6 USB start-up bug made the workaround possible.
+
+Versions and licenses are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 

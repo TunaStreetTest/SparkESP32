@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here.
 
-## 0.1.0 — 2026-11-20
+## 0.1.0 (unreleased)
 
 First public release.
 
@@ -28,8 +28,25 @@ First public release.
   verifies the result end to end.
 - Host tools: `tools/provision.py` for setup from any computer and
   `tools/devctl.py` for QA and CRC-checked screenshots.
-- Tests: the firmware's protocol parser runs on the host, along with the agent,
-  the serial tools and screenshot reassembly.
+- Tests: the firmware's protocol parser and its Wi-Fi link and screen-state machines
+  run on the host, along with the agent, the serial tools and screenshot reassembly.
+- Builds for more than one board. Each lives in `firmware/boards/<id>/` behind a small
+  contract (`firmware/components/board_api`); `make build BOARD=<id>` picks one, and the
+  Waveshare ESP32-C6-Touch-AMOLED-2.16 stays the default and the reference.
+- The LCDWiki 2.8inch ESP32-S3 Display (ES3C28P): a 2.8" 240×320 color SPI TFT on
+  Espressif's `esp_lcd_ili9341` driver, with a compact landscape layout. Verified on
+  hardware.
+- The Waveshare ESP32-S3-RLCD-4.2: a 4.2" black-and-white reflective LCD with a
+  hand-written ST7306 driver and a mono layout. Verified on hardware.
+- Releases carry firmware for every board. The handshake reports `board=<id>`, and the
+  installer picks the board from it (or from the chip, or `--board`) and flashes that
+  board's images at the offsets in its `flash_args`.
+- [docs/adding-a-device.md](docs/adding-a-device.md) walks through a port, and
+  CONTRIBUTING.md and a new-device issue template cover submitting one.
+  `tools/new_board.py` starts a board from the closest existing one, and
+  `tools/check_boards.py` (part of `make check`) checks a board directory has everything,
+  its demo screenshot (`assets/boards/<id>.png`) included.
+- `install.sh --board` reflashes a board whose firmware reports a different board.
 - Works around an ESP32-C6 USB erratum ([espressif/esp-idf#17432](https://github.com/espressif/esp-idf/issues/17432)):
   a power-on boot can leave the USB serial link dead until the chip is reset, so the
   firmware restarts its CPU once at power-on. The host keeps the port through that restart.
