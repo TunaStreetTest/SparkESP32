@@ -1,0 +1,16 @@
+# ESP-IDF
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+
+# make dist / make check outputs
+dist/
+tests/.build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+.DS_Store

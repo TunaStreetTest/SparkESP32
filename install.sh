@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# SparkESP32 installer. Run ON the DGX Spark, from a clone of this repo:
+#
+#   sudo ./install.sh                      # interactive: flash, name, Wi-Fi, service
+#   sudo ./install.sh --name "Lab Spark"   # change the display title later
+#   sudo ./install.sh --ssids "HomeNet"    # set up / change Wi-Fi (password prompted)
+#   sudo ./install.sh --uninstall
+#
+# Plug the display into one of the Spark's USB-C ports first. Safe to re-run:
+# it only reflashes when the board's firmware differs from this release, and it
+# only fills in settings that are unset unless you pass them explicitly.
+# Run ./install.sh --help for every option.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="$(head -n1 "$HERE/VERSION")"
+REPO_URL="https://github.com/twidtwid/SparkESP32"
+OPT=/opt/sparkesp32
+VENV="$OPT/venv"
+UNIT=/etc/systemd/system/sparkesp32.service
+RULES=/etc/udev/rules.d/99-sparkesp32.rules
+HTTP_PORT=8787
+
+usage() {
+    cat <<EOF
+SparkESP32 $VERSION installer. Run on the DGX Spark with sudo.
+
+  --name NAME              fixed display title, up to 24 chars (default: this Spark's
+                           hostname, sent live by the agent; --name "" goes back to it)
+  --host HOST              hostname/IP the display polls over Wi-Fi
+                           (default: $(hostname -s 2>/dev/null || echo spark).local, set once)
+  --ssids "A,B"            Wi-Fi network(s) for the display, tried in order; the
+                           password is prompted for (hidden)
+  --wifi-password-env VAR  take the Wi-Fi password from \$VAR instead of prompting
+                           (sudo --preserve-env=VAR ./install.sh ...)
+  --open-wifi              the Wi-Fi network has no password
+  --clear-wifi             make the display forget its Wi-Fi settings
+  --no-wifi                don't ask about Wi-Fi
+  --rotation none|ccw|cw   screen rotation (default cw: USB-C port on the right)
+  --firmware DIR           flash bootloader.bin, partition-table.bin, sparkesp32.bin from DIR
+  --no-flash               never flash, even if the board needs it
+  --reflash                flash even if the board already runs $VERSION
+  --port DEV               the display's serial port (default: autodetect)
+  --lan CIDR               subnet allowed to reach :$HTTP_PORT through ufw (default: this host's)
+  -y, --yes                no questions (for scripts and agents)
+  --uninstall              remove the service, rules and $OPT (display settings stay)
+EOF
+}
+
+say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+NAME="" NAME_SET="" HOST="" SSIDS="" PW_ENV="" OPEN_WIFI="" CLEAR_WIFI="" NO_WIFI="" ROTATION=""
+FW_DIR="" NO_FLASH="" REFLASH="" PORT="" LAN_CIDR="" YES="" UNINSTALL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --name) NAME="${2?--name needs a value (\"\" for the hostname)}"; NAME_SET=1; shift ;;
+        --host) HOST="${2?--host needs a value}"; shift ;;
+        --ssids) SSIDS="${2?--ssids needs a value}"; shift ;;
+        --wifi-password-env) PW_ENV="${2?--wifi-password-env needs a variable name}"; shift ;;
+        --open-wifi) OPEN_WIFI=1 ;;
+        --clear-wifi) CLEAR_WIFI=1 ;;
+        --no-wifi) NO_WIFI=1 ;;
+        --rotation) ROTATION="${2?--rotation needs none|ccw|cw}"; shift ;;
+        --firmware) FW_DIR="${2?--firmware needs a directory}"; shift ;;
+        --no-flash) NO_FLASH=1 ;;
+        --reflash) REFLASH=1 ;;
+        --port) PORT="${2?--port needs a device}"; shift ;;
+        --lan) LAN_CIDR="${2?--lan needs a CIDR}"; shift ;;
+        -y|--yes) YES=1 ;;
+        --uninstall) UNINSTALL=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) usage >&2; die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+[ "$(id -u)" -eq 0 ] || die "run with sudo: sudo $0 $*"
+interactive() { [ -z "$YES" ] && [ -t 0 ]; }
+
+# ------------------------------------------------------------------ cleanup
+
+ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; }
+
+ufw_delete_ours() {   # rules tagged by this installer or the pre-rename "sparkstat" one
+    ufw_active || return 0
+    local n
+    for n in $(ufw status numbered | sed -En 's/^\[ *([0-9]+)\].*# (sparkesp32|sparkstat) *$/\1/p' | sort -rn); do
+        ufw --force delete "$n" >/dev/null
+    done
+}
+
+remove_legacy() {     # the project's pre-release name; harmless if never installed
+    if [ -e /etc/systemd/system/sparkstat.service ]; then
+        say "removing the old sparkstat service"
+        systemctl disable --now sparkstat.service 2>/dev/null || true
+        rm -f /etc/systemd/system/sparkstat.service /usr/local/bin/sparkstat-agent \
+              /etc/udev/rules.d/99-sparkstat.rules
+        rm -rf /usr/local/share/doc/sparkstat
+        systemctl daemon-reload
+    fi
+}
+
+if [ -n "$UNINSTALL" ]; then
+    say "uninstalling SparkESP32"
+    systemctl disable --now sparkesp32.service 2>/dev/null || true
+    rm -f "$UNIT" "$RULES"
+    remove_legacy
+    ufw_delete_ours
+    rm -rf "$OPT"
+    systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null || true
+    say "done. The display keeps its settings; it will show OFFLINE until fed again."
+    exit 0
+fi
+
+# ------------------------------------------------------------------ preflight
+
+RUN_USER="${RUN_USER:-${SUDO_USER:-}}"
+[ -n "$RUN_USER" ] && [ "$RUN_USER" != root ] ||
+    die "run this with sudo from your normal account (or set RUN_USER=<user>); the agent doesn't run as root"
+id "$RUN_USER" >/dev/null 2>&1 || die "no such user: $RUN_USER"
+command -v python3 >/dev/null || die "python3 is required"
+python3 -c 'import ensurepip, venv' 2>/dev/null || die "python3-venv is required: sudo apt install python3-venv"
+command -v nvidia-smi >/dev/null || warn "nvidia-smi not found: GPU, temperature and power will show --"
+case "$ROTATION" in ""|none|ccw|cw) ;; *) die "--rotation must be none, ccw or cw" ;; esac
+if [ -n "$PW_ENV" ] && [ -z "${!PW_ENV+x}" ]; then
+    die "\$$PW_ENV is not set inside sudo; use: sudo --preserve-env=$PW_ENV $0 ..."
+fi
+
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT
+
+say "SparkESP32 $VERSION for $(hostname -s), agent runs as $RUN_USER"
+remove_legacy
+systemctl stop sparkesp32.service 2>/dev/null || true    # frees the serial port + :$HTTP_PORT
+
+# ------------------------------------------------------------------ files + venv
+
+say "installing to $OPT"
+install -d -m 0755 "$OPT" "$OPT/tools"
+install -m 0644 "$HERE/VERSION" "$OPT/VERSION"
+install -m 0755 "$HERE/agent/sparkesp32_agent.py" "$OPT/sparkesp32_agent.py"
+install -m 0644 "$HERE/tools/sparklink.py" "$OPT/tools/sparklink.py"
+install -m 0755 "$HERE/tools/provision.py" "$HERE/tools/devctl.py" "$OPT/tools/"
+[ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+"$VENV/bin/python" -m pip install --quiet --disable-pip-version-check -r "$HERE/agent/requirements.txt" ||
+    die "pip install failed (needs internet access to PyPI)"
+PY="$VENV/bin/python"
+devctl() { "$PY" "$OPT/tools/devctl.py" ${PORT:+--port "$PORT"} "$@"; }
+
+# ------------------------------------------------------------------ display
+
+if [ -z "$PORT" ]; then
+    mapfile -t PORTS < <("$PY" -c 'import sys; sys.path.insert(0, sys.argv[1]); import sparklink; print("\n".join(sparklink.find_ports()))' "$OPT/tools")
+    [ "${#PORTS[@]}" -gt 1 ] && die "several Espressif USB devices attached (${PORTS[*]}); pick one with --port"
+    PORT="${PORTS[0]:-}"
+fi
+
+app_version() {      # the version string baked into an app image (esp_app_desc_t)
+    "$PY" - "$1" <<'EOF'
+import struct, sys
+b = open(sys.argv[1], "rb").read(256)
+ok = len(b) >= 80 and struct.unpack_from("<I", b, 32)[0] == 0xABCD5432
+print(b[48:80].split(b"\0")[0].decode() if ok else "")
+EOF
+}
+
+firmware_dir() {     # echo a dir holding the three images for $VERSION, fetching if needed
+    local d
+    for d in "$FW_DIR" "$HERE/dist/sparkesp32-firmware-$VERSION"; do
+        [ -n "$d" ] && [ -f "$d/sparkesp32.bin" ] && { echo "$d"; return; }
+    done
+    [ -n "$FW_DIR" ] && die "--firmware $FW_DIR: no sparkesp32.bin there"
+    local b="$HERE/firmware/build"
+    d="$TMPD/fw"
+    mkdir -p "$d"
+    if [ -f "$b/sparkesp32.bin" ]; then          # a local build (developers)
+        cp "$b/bootloader/bootloader.bin" "$b/partition_table/partition-table.bin" "$b/sparkesp32.bin" "$d/"
+        echo "$d"; return
+    fi
+    local url="$REPO_URL/releases/download/v$VERSION/sparkesp32-firmware-$VERSION.tar.gz"
+    say "downloading firmware $VERSION" >&2
+    curl -fsSL "$url" | tar -xz -C "$d" --strip-components=1 || die "couldn't download $url"
+    (cd "$d" && sha256sum --quiet -c SHA256SUMS) || die "firmware checksum mismatch"
+    echo "$d"
+}
+
+DEV_STATUS=""
+read_status() { DEV_STATUS="$(devctl status 2>/dev/null)" || DEV_STATUS=""; }
+
+if [ -z "$PORT" ]; then
+    warn "no display on USB: skipping flash + setup. Plug it into this Spark and re-run,"
+    warn "or set it up from another computer (README: 'Setting up from a Mac or PC')."
+else
+    say "display found on $PORT"
+    read_status
+    BOARD_VER="$(sed -n 's/^fw=sparkesp32 version=\([^ ]*\).*/\1/p' <<<"$DEV_STATUS")"
+    if [ -n "$NO_FLASH" ]; then
+        [ -n "$BOARD_VER" ] || warn "the board isn't running SparkESP32 firmware and --no-flash was given"
+    elif [ -n "$REFLASH" ] || [ "$BOARD_VER" != "$VERSION" ]; then
+        FW="$(firmware_dir)"
+        IMG_VER="$(app_version "$FW/sparkesp32.bin")"
+        [ "$IMG_VER" = "$VERSION" ] || warn "firmware image is version '${IMG_VER:-?}', expected $VERSION"
+        say "flashing firmware ${IMG_VER:-?} (board had: ${BOARD_VER:-other firmware})"
+        # Split images, never a merged one: a merged image overwrites the NVS
+        # partition and the board would forget its Wi-Fi and name.
+        "$PY" -m esptool --chip esp32c6 -p "$PORT" -b 460800 --before default_reset --after hard_reset \
+            write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0 "$FW/bootloader.bin" 0x8000 "$FW/partition-table.bin" 0x10000 "$FW/sparkesp32.bin" \
+            || die "flashing failed; hold BOOT while plugging in the board, then re-run"
+        for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 1; read_status; [ -n "$DEV_STATUS" ] && break; done
+        [ -n "$DEV_STATUS" ] || die "the board didn't answer after flashing"
+    else
+        say "board already runs $VERSION"
+    fi
+fi
+
+# ------------------------------------------------------------------ settings
+
+if [ -n "$PORT" ] && [ -n "$DEV_STATUS" ]; then
+    URL_SET="$(sed -n 's/^wifi configured=[01] connected=[01] url=\([01]\)$/\1/p' <<<"$DEV_STATUS")"
+    WIFI_SET="$(sed -n 's/^wifi configured=\([01]\).*/\1/p' <<<"$DEV_STATUS")"
+    args=()
+
+    # no saved name = the display shows this Spark's hostname, live from the agent
+    [ -n "$NAME_SET" ] && args+=(--name "$NAME")
+    [ -n "$ROTATION" ] && args+=(--rotation "$ROTATION")
+
+    if [ -z "$HOST" ] && [ "$URL_SET" != 1 ]; then
+        if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
+            HOST="$(hostname -s).local"
+        else
+            HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+            warn "avahi (mDNS) isn't running, so the display will poll $HOST directly;"
+            warn "give this Spark a DHCP reservation or re-run with --host if that address changes"
+        fi
+    fi
+    [ -n "$HOST" ] && args+=(--host "$HOST")
+
+    if [ -n "$CLEAR_WIFI" ]; then
+        args+=(--clear-wifi)
+    elif [ -z "$SSIDS" ] && [ -z "$NO_WIFI" ] && [ "$WIFI_SET" != 1 ] && interactive; then
+        echo
+        echo "Wi-Fi is optional: with it, the display keeps working when it isn't plugged"
+        echo "into this Spark (it polls this Spark's agent on your LAN). The ESP32-C6 only"
+        echo "sees 2.4 GHz networks. Networks it can see right now:"
+        devctl wifi scan 2>/dev/null | sed -n "s/^ap ssid='\(.\{1,\}\)' chan=.* rssi=\(-\{0,1\}[0-9]*\).*/\1|\2/p" |
+            sort -t'|' -k2,2nr | awk -F'|' '!seen[$1]++ { printf "    %-32s %s dBm\n", $1, $2 }' | head -12
+        HERE_SSID="$(nmcli -t -f active,ssid dev wifi 2>/dev/null | sed -n 's/^yes://p' | head -n1 || true)"
+        [ -n "$HERE_SSID" ] && echo "(this Spark is on \"$HERE_SSID\")"
+        read -r -p "Network name(s) for the display, comma-separated (Enter to skip): " SSIDS
+    fi
+    if [ -n "$SSIDS" ]; then
+        args+=(--ssids "$SSIDS")
+        if [ -n "$OPEN_WIFI" ]; then args+=(--open)
+        elif [ -n "$PW_ENV" ]; then args+=(--password-env "$PW_ENV")
+        elif ! interactive; then die "--ssids needs a password: run interactively, or use --wifi-password-env VAR / --open-wifi"
+        fi
+    fi
+
+    say "configuring the display"
+    "$PY" "$OPT/tools/provision.py" ${PORT:+--port "$PORT"} "${args[@]}" ||
+        die "display setup failed (see above); nothing else was changed on the board"
+fi
+
+# ------------------------------------------------------------------ service
+
+say "udev: keep ModemManager off the display"
+install -m 0644 "$HERE/agent/99-sparkesp32.rules" "$RULES"
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=tty || true
+
+say "systemd: sparkesp32.service as $RUN_USER"
+sed "s/@RUN_USER@/$RUN_USER/" "$HERE/agent/sparkesp32.service" > "$UNIT"
+systemctl daemon-reload
+systemctl enable --quiet sparkesp32.service
+systemctl restart sparkesp32.service
+
+if [ -z "$LAN_CIDR" ]; then
+    dev="$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
+    addr="$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4; exit}')"
+    LAN_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$addr" 2>/dev/null || true)"
+fi
+if ufw_active; then
+    ufw_delete_ours
+    [ -n "$LAN_CIDR" ] || die "couldn't work out this host's LAN subnet; re-run with --lan CIDR"
+    say "ufw: allow $LAN_CIDR -> :$HTTP_PORT/tcp"
+    ufw allow from "$LAN_CIDR" to any port "$HTTP_PORT" proto tcp comment sparkesp32 >/dev/null
+else
+    warn "no active ufw firewall: :$HTTP_PORT/stat (read-only vitals) is open to anything that"
+    warn "can reach this host. Fine on a home LAN; firewall it if this Spark is exposed."
+fi
+
+# ------------------------------------------------------------------ verify
+
+say "checking"
+ok=""
+for _ in $(seq 1 15); do
+    sleep 1
+    curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/stat" 2>/dev/null | grep -q '^stat ' && { ok=1; break; }
+done
+[ -n "$ok" ] || { systemctl --no-pager --lines=15 status sparkesp32.service >&2 || true; die "the agent isn't serving /stat"; }
+echo "    $(curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/stat")"
+display="not connected"
+if [ -n "$PORT" ]; then
+    for _ in $(seq 1 10); do
+        display="$(curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/healthz" 2>/dev/null |
+                   "$PY" -c 'import json, sys; print(json.load(sys.stdin)["display"])' 2>/dev/null)" ||
+            display="not connected"
+        case "$display" in connected*) break ;; esac
+        sleep 1
+    done
+fi
+
+echo
+say "SparkESP32 $VERSION is running"
+echo "    agent:    http://$(hostname -s).local:$HTTP_PORT/stat  (and /healthz)"
+echo "    display:  $display"
+case "$display" in
+    connected*) echo "    the screen should read ONLINE via USB within a couple of seconds" ;;
+    *) echo "    plug the display into this Spark's USB-C, or put it on Wi-Fi (README)" ;;
+esac
+echo "    logs:     journalctl -u sparkesp32 -f"
+echo "    change:   sudo $0 --name ... | --ssids ... | --host ...   (re-run any time)"

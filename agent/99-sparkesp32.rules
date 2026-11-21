@@ -1,0 +1,4 @@
+# SparkESP32: the ESP32-C6 display enumerates as an Espressif USB-Serial/JTAG
+# CDC-ACM device. ModemManager (active on DGX OS) probes new ttyACM ports with
+# AT commands, which would spray garbage into the display's console. Keep out.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_MM_DEVICE_IGNORE}="1"

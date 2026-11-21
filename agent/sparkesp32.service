@@ -1,0 +1,27 @@
+[Unit]
+Description=SparkESP32 - DGX Spark vitals feed for the ESP32 status display
+Documentation=https://github.com/twidtwid/SparkESP32
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# @RUN_USER@ is filled in by install.sh (the user who ran sudo)
+User=@RUN_USER@
+# serial access to the display without adding the user to dialout
+SupplementaryGroups=dialout
+ExecStart=/opt/sparkesp32/venv/bin/python /opt/sparkesp32/sparkesp32_agent.py
+Restart=always
+RestartSec=3
+
+# the agent only reads /proc, runs nvidia-smi, opens one tty and one socket
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

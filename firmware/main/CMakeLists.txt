@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS "main.c" "ui.c" "spark_data.c" "settings.c" "net.c" "console_cmds.c"
+    INCLUDE_DIRS "."
+    PRIV_REQUIRES
+        board
+        console
+        mbedtls
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        esp_http_client
+        esp_timer
+        esp_app_format)
