@@ -2,7 +2,6 @@
 // LVGL on top of the board's panel, via espressif/esp_lvgl_adapter, plus a
 // 90-degree rotation done in the flush path (the panel can't rotate itself).
 
-#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -20,6 +19,10 @@ void      display_unlock(void);
 
 void          display_set_rotation(display_rot_t rot);   // caller holds the lock
 display_rot_t display_get_rotation(void);
+
+// "none" | "ccw" | "cw", as saved in NVS and typed at the console
+int         display_rot_from_name(const char *name);     // -1 if not one of those
+const char *display_rot_name(display_rot_t rot);
 
 #ifdef __cplusplus
 }

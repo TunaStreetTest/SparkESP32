@@ -10,13 +10,13 @@
 #include "display.h"
 #include "board.h"
 
+#include <assert.h>
+#include <string.h>
+
 #include "esp_heap_caps.h"
-#include "esp_log.h"
 #include "esp_lv_adapter.h"
 #include "lvgl.h"
 #include "lvgl_private.h"   // display->flush_cb: no public getter in LVGL 9.x
-
-static const char *TAG = "display";
 
 #define STRIP_LINES 40      // partial render buffer: 480*40*2 = 37.5 KB (no PSRAM)
 
@@ -25,20 +25,31 @@ static lv_display_flush_cb_t s_panel_flush;
 static uint16_t *s_rot_buf;
 static display_rot_t s_rot;
 
+static const char *const ROT_NAMES[] = {"none", "ccw", "cw"};   // indexed by display_rot_t
+
+int display_rot_from_name(const char *name)
+{
+    for (int i = 0; i < 3; i++)
+        if (!strcmp(name, ROT_NAMES[i])) return i;
+    return -1;
+}
+
+const char *display_rot_name(display_rot_t rot) { return ROT_NAMES[rot]; }
+
 static void rotate_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_map)
 {
-    const int L = BOARD_LCD_W;            // square panel
-    int w = lv_area_get_width(area);
-    int h = lv_area_get_height(area);
-    if (s_rot == DISPLAY_ROT_NONE || !s_rot_buf || w * h > L * STRIP_LINES) {
+    if (s_rot == DISPLAY_ROT_NONE) {
         s_panel_flush(d, area, px_map);
         return;
     }
+    const int L = BOARD_LCD_W;            // square panel
+    int w = lv_area_get_width(area);
+    int h = lv_area_get_height(area);
+    assert(w * h <= L * STRIP_LINES);     // an area never holds more pixels than the draw buffer
     // LVGL may pad draw-buffer rows (LV_DRAW_BUF_STRIDE_ALIGN): walk the
     // source at its real stride, not at w.
     lv_draw_buf_t *db = d->buf_act;
-    int src_stride = db ? (int)(db->header.stride / 2) : w;
-    if (src_stride < w) src_stride = w;
+    int src_stride = (int)(db->header.stride / 2);
     const uint16_t *src = (const uint16_t *)px_map;
     lv_area_t out;
     if (s_rot == DISPLAY_ROT_CCW) {
@@ -69,14 +80,10 @@ static void rotate_flush_cb(lv_display_t *d, const lv_area_t *area, uint8_t *px_
     // at the *rotated* width (h pixels), so report that stride for the
     // hand-off and restore LVGL's afterwards. The adapter reads it
     // synchronously, before this call returns.
-    if (db) {
-        uint32_t saved = db->header.stride;
-        db->header.stride = (uint32_t)h * 2;
-        s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
-        db->header.stride = saved;
-    } else {
-        s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
-    }
+    uint32_t saved = db->header.stride;
+    db->header.stride = (uint32_t)h * 2;
+    s_panel_flush(d, &out, (uint8_t *)s_rot_buf);
+    db->header.stride = saved;
 }
 
 // The SH8601 needs window starts on even and ends on odd coordinates. With
@@ -106,24 +113,17 @@ esp_err_t display_start(display_rot_t rot)
     if (!s_disp) return ESP_FAIL;
     lv_display_add_event_cb(s_disp, round_area_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
-    s_rot = rot;
     s_rot_buf = heap_caps_malloc(BOARD_LCD_W * STRIP_LINES * 2, MALLOC_CAP_DMA);
-    if (s_rot_buf) {
-        s_panel_flush = s_disp->flush_cb;
-        lv_display_set_flush_cb(s_disp, rotate_flush_cb);
-    } else {
-        ESP_LOGE(TAG, "no DMA memory for the rotation buffer; rotation disabled");
-        s_rot = DISPLAY_ROT_NONE;
-    }
+    if (!s_rot_buf) return ESP_ERR_NO_MEM;
+    s_rot = rot;
+    s_panel_flush = s_disp->flush_cb;
+    lv_display_set_flush_cb(s_disp, rotate_flush_cb);
     return esp_lv_adapter_start();
 }
 
 esp_err_t display_lock(int timeout_ms) { return esp_lv_adapter_lock(timeout_ms); }
 void display_unlock(void) { esp_lv_adapter_unlock(); }
 
-void display_set_rotation(display_rot_t rot)
-{
-    if (s_rot_buf) s_rot = rot;           // no scratch buffer -> stays unrotated
-}
+void display_set_rotation(display_rot_t rot) { s_rot = rot; }
 
 display_rot_t display_get_rotation(void) { return s_rot; }

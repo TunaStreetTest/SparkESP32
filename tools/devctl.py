@@ -3,7 +3,7 @@
 
   devctl.py status                   firmware, settings, heap/stack, last sample
   devctl.py demo [load]              synthetic sample (load 0-100, default 42)
-  devctl.py shot out.png [--swap]    CRC-verified framebuffer dump -> PNG (needs Pillow)
+  devctl.py shot out.png             CRC-verified framebuffer dump -> PNG (needs Pillow)
   devctl.py demoshot out.png [load]  demo + shot in one session, so it stays ONLINE
   devctl.py wifi [show|scan|clear|ssids <a,b>|url <url>]
   devctl.py name "<text>"            header title
@@ -14,6 +14,7 @@
 Wi-Fi passwords go through provision.py, which never prints them.
 Port: --port PATH, $SPARKESP32_PORT, or autodetect (Espressif USB 303a:1001).
 """
+import argparse
 import base64
 import os
 import re
@@ -33,8 +34,8 @@ def parse_shot(raw):
     lines = clean_lines(raw)
     try:
         start = next(i for i, ln in enumerate(lines) if ln.startswith("SHOT-BEGIN"))
-    except StopIteration:
-        raise LinkError("no SHOT-BEGIN in reply") from None
+    except StopIteration:   # e.g. "ERR lock": report the firmware's own words
+        raise LinkError(next((ln for ln in lines if ln.startswith("ERR")), "no SHOT-BEGIN")) from None
     w, h = map(int, lines[start].split()[1:3])
     fb, covered, i = bytearray(w * h * 2), 0, start + 1
     while i < len(lines) and not lines[i].startswith("SHOT-END"):
@@ -59,29 +60,23 @@ def parse_shot(raw):
     return w, h, fb
 
 
-def save_png(path, w, h, fb, swap):
+def save_png(path, w, h, fb):
     try:
         from PIL import Image
     except ImportError:
         sys.exit("shot needs Pillow: pip install pillow  (or: uv run --with pyserial --with pillow ...)")
-    rgb = bytearray(w * h * 3)
-    for p in range(w * h):
-        lo, hi = fb[2 * p], fb[2 * p + 1]
-        v = (lo << 8 | hi) if swap else (hi << 8 | lo)
-        r, g, b = v >> 11, (v >> 5) & 0x3F, v & 0x1F
-        rgb[3 * p:3 * p + 3] = bytes((r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2))
-    Image.frombytes("RGB", (w, h), bytes(rgb)).save(path)
+    Image.frombytes("RGB", (w, h), bytes(fb), "raw", "BGR;16").save(path)   # little-endian RGB565
     print("saved", path)
 
 
-def shot(port, path, swap, pre=None):
+def shot(port, path, pre=None):
     for attempt in range(1, 4):
         try:
             with connect(port) as link:
                 if pre:
                     link.check(pre)
                 w, h, fb = parse_shot(link.raw("shot", timeout=90))
-            return save_png(path, w, h, fb, swap)
+            return save_png(path, w, h, fb)
         except LinkError as e:
             print(f"shot attempt {attempt}/3: {e}", file=sys.stderr)
             time.sleep(1)
@@ -89,23 +84,18 @@ def shot(port, path, swap, pre=None):
 
 
 def main():
-    argv = sys.argv[1:]
-    port = os.environ.get("SPARKESP32_PORT")
-    if "--port" in argv:
-        k = argv.index("--port")
-        port = argv[k + 1]
-        del argv[k:k + 2]
-    swap = "--swap" in argv
-    argv = [x for x in argv if x != "--swap"]
-    if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__)
-        return 0 if argv else 1
-    cmd, args = argv[0], argv[1:]
+    ap = argparse.ArgumentParser(usage="devctl.py [--port PATH] COMMAND [ARGS...]", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--port", default=os.environ.get("SPARKESP32_PORT"), help=argparse.SUPPRESS)
+    ap.add_argument("cmd", help=argparse.SUPPRESS)
+    ap.add_argument("args", nargs="*", help=argparse.SUPPRESS)
+    a = ap.parse_intermixed_args()
+    port, cmd, args = a.port, a.cmd, a.args
 
     if cmd == "shot":
-        return shot(port, args[0] if args else "shot.png", swap)
+        return shot(port, args[0] if args else "shot.png")
     if cmd == "demoshot":
-        return shot(port, args[0] if args else "shot.png", swap,
+        return shot(port, args[0] if args else "shot.png",
                     pre="demo " + (args[1] if len(args) > 1 else "60"))
     if cmd == "log":
         secs = float(args[0]) if args else 15
@@ -116,10 +106,8 @@ def main():
         print("\n".join(clean_lines(buf)))
         return 0
 
-    if cmd == "status":
-        line = "status"
-    elif cmd == "demo":
-        line = "demo " + (args[0] if args else "42")
+    if cmd in ("status", "demo", "rot"):
+        line = " ".join([cmd, *args[:1]])
     elif cmd == "wifi":
         if args and args[0] == "pass":
             sys.exit("use tools/provision.py --ssids ... for the password; it never prints it")
@@ -128,17 +116,14 @@ def main():
         if len(args) != 1:
             sys.exit('usage: devctl.py name "<text>"')
         line = "name " + console_quote(args[0])
-    elif cmd == "rot":
-        line = "rot " + (args[0] if args else "")
     elif cmd == "send":
         line = " ".join(args)
     else:
-        print(__doc__)
-        return 1
+        ap.error(f"unknown command '{cmd}'")
 
     try:
         with connect(port) as link:
-            out = link.cmd(line.strip(), timeout=30)
+            out = link.cmd(line, timeout=30)
     except LinkError as e:
         sys.exit(f"error: {e}")
     print("\n".join(out))

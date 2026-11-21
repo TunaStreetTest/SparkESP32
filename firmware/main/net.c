@@ -54,14 +54,14 @@ static int  s_nssids, s_cur, s_fails;
 static char s_pass[PASS_MAX + 1];
 static char s_url[URL_MAX + 1];
 
-static volatile bool s_connecting;
+static bool s_connecting;
 static uint32_t s_attempt_ms, s_next_try_ms, s_backoff_ms = BACKOFF_MIN_MS;
 static volatile bool s_paused;       // set while scanning
 static char s_last_err[64];
 static unsigned s_poll_ok, s_poll_err;
 
-#define LOCK()   xSemaphoreTakeRecursive(s_mtx, portMAX_DELAY)
-#define UNLOCK() xSemaphoreGiveRecursive(s_mtx)
+#define LOCK()   xSemaphoreTake(s_mtx, portMAX_DELAY)
+#define UNLOCK() xSemaphoreGive(s_mtx)
 
 static void set_err(const char *fmt, ...)
 {
@@ -93,18 +93,20 @@ static int split_ssids(const char *csv, char out[MAX_SSIDS][SSID_MAX + 1])
     return n;
 }
 
+// The one place the saved config becomes the RAM copy the supervisor uses.
 static void load_cfg(void)
 {
     char csv[MAX_SSIDS * (SSID_MAX + 1) + 1];
+    char tmp[MAX_SSIDS][SSID_MAX + 1] = {0};
     settings_get("ssids", csv, sizeof(csv), "");
-    char tmp[MAX_SSIDS][SSID_MAX + 1];
     int n = csv[0] ? split_ssids(csv, tmp) : 0;
     LOCK();
     s_nssids = n > 0 ? n : 0;
+    if (s_cur >= s_nssids) s_cur = 0;
     memcpy(s_ssids, tmp, sizeof(tmp));
+    memset(s_pass, 0, sizeof(s_pass));           // don't leave an old passphrase's tail in RAM
     settings_get("pass", s_pass, sizeof(s_pass), "");
     settings_get("url", s_url, sizeof(s_url), "");
-    s_cur = s_fails = 0;
     UNLOCK();
 }
 
@@ -140,58 +142,45 @@ static void restart_link(void)
     esp_wifi_disconnect();
 }
 
+// Persist one setting, reload the RAM config, and (for link settings) rejoin.
+static esp_err_t save(const char *key, const char *val, bool relink)
+{
+    esp_err_t err = settings_set(key, val);
+    if (err != ESP_OK) return err;
+    load_cfg();
+    if (relink) restart_link();
+    return ESP_OK;
+}
+
 esp_err_t net_set_ssids(const char *csv)
 {
     char tmp[MAX_SSIDS][SSID_MAX + 1];
-    int n = split_ssids(csv, tmp);
-    if (n <= 0) return ESP_ERR_INVALID_ARG;
-    esp_err_t err = settings_set("ssids", csv);
-    if (err != ESP_OK) return err;
-    LOCK();
-    memcpy(s_ssids, tmp, sizeof(tmp));
-    s_nssids = n;
-    UNLOCK();
-    restart_link();
-    return ESP_OK;
+    if (split_ssids(csv, tmp) <= 0) return ESP_ERR_INVALID_ARG;
+    return save("ssids", csv, true);
 }
 
 esp_err_t net_set_pass(const char *pass)
 {
     size_t len = strlen(pass);
     if (len != 0 && (len < 8 || len > PASS_MAX)) return ESP_ERR_INVALID_ARG;   // WPA2/3 PSK rules
-    esp_err_t err = settings_set("pass", pass);
-    if (err != ESP_OK) return err;
-    LOCK();
-    strlcpy(s_pass, pass, sizeof(s_pass));
-    UNLOCK();
-    restart_link();
-    return ESP_OK;
+    return save("pass", pass, true);
 }
 
 esp_err_t net_set_url(const char *url)
 {
     if (strncmp(url, "http://", 7) != 0 || strlen(url) > URL_MAX || !url[7])
         return ESP_ERR_INVALID_ARG;                // plain HTTP on the LAN only
-    esp_err_t err = settings_set("url", url);
-    if (err != ESP_OK) return err;
-    LOCK();
-    strlcpy(s_url, url, sizeof(s_url));
-    UNLOCK();
-    return ESP_OK;
+    return save("url", url, false);
 }
 
 esp_err_t net_clear(void)
 {
-    settings_set("ssids", NULL);
-    settings_set("pass", NULL);
-    settings_set("url", NULL);
-    LOCK();
-    s_nssids = 0;
-    memset(s_pass, 0, sizeof(s_pass));
-    s_url[0] = 0;
-    UNLOCK();
+    esp_err_t err = settings_set("ssids", NULL);
+    if (err == ESP_OK) err = settings_set("pass", NULL);
+    if (err == ESP_OK) err = settings_set("url", NULL);
+    load_cfg();                                    // whatever NVS now holds
     restart_link();
-    return ESP_OK;
+    return err;
 }
 
 // ---------------------------------------------------------------- wifi events
@@ -202,10 +191,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         xEventGroupClearBits(s_ev, EV_CONNECTED);
         wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
         LOCK();
-        if (s_connecting) {                        // a failed attempt, not our own disconnect
+        if (s_connecting) {                        // a failed attempt: keep its backoff deadline
             s_fails++;
             snprintf(s_last_err, sizeof(s_last_err), "join '%s' reason %d",
                      s_nssids ? s_ssids[s_cur] : "", d ? d->reason : -1);
+        } else {
+            // A link that was up dropped (or we dropped it): retry now. This also
+            // keeps the deadline recent; one set at the last join could be over
+            // 2^31 ms old after weeks connected and wrap to "in the future".
+            s_next_try_ms = spark_now_ms();
         }
         s_connecting = false;
         UNLOCK();
@@ -281,9 +275,8 @@ static int http_get(const char *url, char *buf, int cap)
         } else if (clen <= 0 || clen >= cap) {
             set_err("bad length %lld", (long long)clen);
         } else {
-            int tot = 0, r;
-            while (tot < clen && (r = esp_http_client_read(c, buf + tot, (int)clen - tot)) > 0)
-                tot += r;
+            int tot = esp_http_client_read_response(c, buf, (int)clen);
+            if (tot < 0) tot = 0;
             buf[tot] = 0;
             if (tot == clen) n = tot;
             else set_err("short body %d/%lld", tot, (long long)clen);
@@ -314,23 +307,18 @@ static void poll_once(void)
 
     char *argv[10];
     int argc = 0;
-    bool overflow = false;
-    char *save = NULL;
-    for (char *t = strtok_r(body, " \t\r\n", &save); t; t = strtok_r(NULL, " \t\r\n", &save)) {
-        if (argc == 10) { overflow = true; break; }
+    char *tok = NULL;
+    for (char *t = strtok_r(body, " \t\r\n", &tok); t && argc < 10; t = strtok_r(NULL, " \t\r\n", &tok))
         argv[argc++] = t;
+    // too many fields is usually an agent speaking an older protocol: say so plainly
+    const char *why = "too many fields: update the agent";
+    int rc = -1;
+    if (argc < 10) {
+        if (display_lock(1000) != ESP_OK) { s_poll_err++; return; }
+        rc = spark_apply_args(argc, argv, SRC_WIFI, &why);
+        if (rc == 0) ui_update();
+        display_unlock();
     }
-    if (overflow || argc == 0) {
-        // overflow is usually an agent speaking an older protocol: say so plainly
-        s_poll_err++;
-        set_err("bad stat line (%s)", overflow ? "too many fields: update the agent" : "empty body");
-        return;
-    }
-    const char *why = NULL;
-    if (display_lock(1000) != ESP_OK) { s_poll_err++; return; }
-    int rc = spark_apply_args(argc, argv, SRC_WIFI, &why);
-    if (rc == 0) ui_update();
-    display_unlock();
     if (rc == 0) {
         s_poll_ok++;
     } else {
@@ -362,10 +350,10 @@ static void purge_driver_copy(void)
     }
 }
 
-esp_err_t net_start(void)
+void net_start(void)
 {
     s_ev = xEventGroupCreate();
-    s_mtx = xSemaphoreCreateRecursiveMutex();
+    s_mtx = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     s_netif = esp_netif_create_default_wifi_sta();
@@ -387,7 +375,6 @@ esp_err_t net_start(void)
     ESP_LOGI(TAG, "wifi up: %d ssid(s), url %s", s_nssids, s_url[0] ? s_url : "(unset)");
 
     xTaskCreatePinnedToCore(net_task, "net", 8192, NULL, 4, NULL, 0);
-    return ESP_OK;
 }
 
 // ---------------------------------------------------------------- console helpers

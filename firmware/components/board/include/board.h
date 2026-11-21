@@ -19,9 +19,6 @@ esp_err_t board_init(void);
 esp_lcd_panel_handle_t    board_lcd_panel(void);
 esp_lcd_panel_io_handle_t board_lcd_io(void);
 
-// Panel brightness, 0-100 %.
-esp_err_t board_set_brightness(uint8_t pct);
-
 #ifdef __cplusplus
 }
 #endif

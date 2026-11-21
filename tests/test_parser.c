@@ -46,6 +46,11 @@ static void rejects(const char *line, const char *want_why)
 
 int main(void)
 {
+    // ---- before any sample, every field is unknown (the screen shows "--")
+    CHECK(!g_spark.valid && g_spark.cpu == SPARK_UNKNOWN && g_spark.gpu == SPARK_UNKNOWN &&
+          g_spark.temp_c == SPARK_UNKNOWN && g_spark.power_dw == SPARK_UNKNOWN &&
+          g_spark.ncores == 0 && spark_mem_pct() == SPARK_UNKNOWN, "unfed state is unknown");
+
     // ---- a real 20-core Spark sample, as sparkesp32-agent sends it
     g_fake_us = 5000000;
     accepts("stat 6 91 46328 130661 60 410 1,1,1,2,0,0,1,0,1,1,0,0,1,1,1,1,99,1,0,0 spark-1a2b");

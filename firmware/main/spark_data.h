@@ -42,7 +42,7 @@ const char *spark_src_name(spark_src_t src);
 
 // Parse a tokenized `stat` line (argv[0] == "stat") and, if every field is
 // well-formed, commit it to g_spark. On failure g_spark is untouched and
-// *why (if non-NULL) names the offending field. Caller holds display_lock().
+// *why names the offending field. Caller holds display_lock().
 int spark_apply_args(int argc, char **argv, spark_src_t src, const char **why);
 
 // Synthetic sample for bench QA.

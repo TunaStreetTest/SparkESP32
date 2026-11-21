@@ -28,10 +28,6 @@ static const char *TAG = "board";
 #define LCD_PCLK_HZ   (40 * 1000 * 1000)
 #define LCD_MAX_XFER  (BOARD_LCD_W * 50 * 2)   // >= one LVGL strip (40 lines) + slack
 
-// QSPI command framing used by SH8601-family controllers: 0x02 = write, the
-// 8-bit DCS command sits in bits 15:8 of the 32-bit command word.
-#define QSPI_WRITE_CMD(dcs) ((0x02u << 24) | ((uint32_t)(dcs) << 8))
-
 static i2c_master_bus_handle_t   s_i2c;
 static esp_lcd_panel_io_handle_t s_io;
 static esp_lcd_panel_handle_t    s_panel;
@@ -120,10 +116,3 @@ esp_err_t board_init(void)
 
 esp_lcd_panel_handle_t board_lcd_panel(void) { return s_panel; }
 esp_lcd_panel_io_handle_t board_lcd_io(void) { return s_io; }
-
-esp_err_t board_set_brightness(uint8_t pct)
-{
-    if (pct > 100) pct = 100;
-    uint8_t level = (uint8_t)(pct * 255 / 100);
-    return esp_lcd_panel_io_tx_param(s_io, QSPI_WRITE_CMD(0x51), &level, 1);
-}

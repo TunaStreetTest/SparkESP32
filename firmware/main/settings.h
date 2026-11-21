@@ -10,11 +10,10 @@ extern "C" {
 
 esp_err_t settings_init(void);   // nvs_flash_init, erase+retry on layout change
 
-// Copies the value into buf (always NUL-terminated). Missing key or a value
-// that doesn't fit -> def (or "") and ESP_ERR_NOT_FOUND / ESP_ERR_INVALID_SIZE.
-esp_err_t settings_get(const char *key, char *buf, size_t len, const char *def);
+// Copies the value into buf (always NUL-terminated); a missing key, or a value
+// that doesn't fit in len, gives def instead (never a truncated value).
+void      settings_get(const char *key, char *buf, size_t len, const char *def);
 esp_err_t settings_set(const char *key, const char *val);   // val NULL erases
-esp_err_t settings_erase_all(void);
 
 #ifdef __cplusplus
 }

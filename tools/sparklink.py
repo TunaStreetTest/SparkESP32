@@ -20,9 +20,12 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ESP_LOG = re.compile(r"[EWIDV] \(\d+\) ")   # "I (4378) tag: ...": the board logging, never a reply
 PROMPT = "spark>"
 
-# the line that ends each command's reply
-_ENDS = {"status": r"STATUS-END", "shot": r"SHOT-END"}
-_WIFI_ENDS = {"show": r"NET-END", "scan": r"SCAN-END"}
+# Multi-line replies end with a marker line, keyed by the command's first two
+# words; an "ERR ..." line ends them early (`shot` -> "ERR lock"). Every other
+# command's reply is its OK/ERR verdict line.
+_ENDS = {"status": "STATUS-END", "shot": "SHOT-END", "wifi": "NET-END",
+         "wifi show": "NET-END", "wifi scan": "SCAN-END"}
+_VERDICT = r"^(OK|ERR)\b"
 
 
 class LinkError(RuntimeError):
@@ -37,12 +40,8 @@ def find_ports():
 
 
 def end_pattern(cmd):
-    words = cmd.split()
-    head = words[0] if words else ""
-    if head == "wifi":
-        sub = words[1] if len(words) > 1 else "show"
-        return _WIFI_ENDS.get(sub, r"^(OK|ERR)\b")
-    return _ENDS.get(head, r"^(OK|ERR)\b")
+    marker = _ENDS.get(" ".join(cmd.split()[:2]))
+    return rf"^({marker}$|ERR\s)" if marker else _VERDICT
 
 
 def clean_lines(raw):
@@ -54,7 +53,10 @@ def clean_lines(raw):
 class Link:
     def __init__(self, port):
         self.port = port
-        self.ser = serial.Serial(port, 115200, timeout=0.2, write_timeout=2)
+        try:
+            self.ser = serial.Serial(port, 115200, timeout=0.2, write_timeout=2)
+        except serial.SerialException as e:
+            raise LinkError(f"can't open {port}: {e}") from None
         time.sleep(0.2)
         self.ser.reset_input_buffer()
 
@@ -79,8 +81,9 @@ class Link:
             if not chunk:
                 continue
             buf += chunk
-            if end.search("\n".join(self._reply(buf, cmd))):
-                return buf
+            done = buf[:buf.rfind(b"\n") + 1]     # only a whole line can end the reply
+            if done and end.search("\n".join(self._reply(done, cmd))):
+                return done
         raise LinkError(f"no reply to '{cmd.split()[0]}' within {timeout:.0f}s")
 
     @staticmethod

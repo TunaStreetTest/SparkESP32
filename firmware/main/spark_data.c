@@ -2,13 +2,16 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_timer.h"
 
-spark_t g_spark;
+// Nothing measured until the first sample: every field reads as unknown ("--").
+spark_t g_spark = {
+    .cpu = SPARK_UNKNOWN, .gpu = SPARK_UNKNOWN, .mem_used_mb = SPARK_UNKNOWN,
+    .mem_total_mb = SPARK_UNKNOWN, .temp_c = SPARK_UNKNOWN, .power_dw = SPARK_UNKNOWN,
+};
 
 uint32_t spark_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -76,8 +79,6 @@ static bool parse_host(const char *tok, char *out)
 
 int spark_apply_args(int argc, char **argv, spark_src_t src, const char **why)
 {
-    const char *dummy;
-    if (!why) why = &dummy;
     if (argc != 9 || strcmp(argv[0], "stat") != 0) { *why = "expected 8 fields"; return -1; }
 
     spark_t s = {0};

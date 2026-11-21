@@ -13,7 +13,6 @@
 #include "lvgl.h"
 
 #define STALE_MS 5000          // no sample for this long -> OFFLINE / NO WI-FI
-#define TITLE_MAX 24
 
 // palette
 #define C_BG     lv_color_hex(0x0A0A0A)
@@ -34,24 +33,15 @@ static lv_obj_t *s_scr, *s_name;
 static lv_obj_t *s_dot, *s_livetext, *s_srctext;
 static ring_t    s_cpu, s_gpu, s_mem;
 static lv_obj_t *s_cells[SPARK_MAX_CORES];
-static int       s_ncells = -1;
+static int       s_ncells;
 static lv_obj_t *s_temp_val, *s_pow_val;
 
 // 0..100 load -> green (idle) -> yellow -> red (pinned)
 static lv_color_t heat_color(int pct)
 {
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    int r, g;
-    if (pct < 55) {
-        r = 0x40 + pct * (0xE0 - 0x40) / 55;
-        g = 0xB9;
-    } else {
-        int t = (pct - 55) * 255 / 45;
-        r = 0xE0 + t * (0xFF - 0xE0) / 255;
-        g = 0xB9 - t * (0xB9 - 0x30) / 255;
-    }
-    return lv_color_make(r, g, 0x10);
+    if (pct < 55) return lv_color_make(0x40 + pct * (0xE0 - 0x40) / 55, 0xB9, 0x10);
+    return lv_color_make(0xE0 + (pct - 55) * (0xFF - 0xE0) / 45,
+                         0xB9 - (pct - 55) * (0xB9 - 0x30) / 45, 0x10);
 }
 
 static lv_obj_t *mklabel(lv_obj_t *p, const lv_font_t *f, lv_color_t c, const char *t)
@@ -75,16 +65,18 @@ static void make_ring(ring_t *rg, int cx, int cy, int r, const char *title)
     lv_arc_set_value(arc, 0);
     lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
     lv_obj_set_clickable(arc, false);
+    lv_obj_set_scrollable(arc, false);             // its labels (below) must never scroll it
     lv_obj_set_style_arc_width(arc, 10, LV_PART_MAIN);
     lv_obj_set_style_arc_color(arc, C_TRACK, LV_PART_MAIN);
     lv_obj_set_style_arc_width(arc, 10, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(arc, C_GREEN, LV_PART_INDICATOR);
     rg->arc = arc;
 
-    rg->val = mklabel(s_scr, &lv_font_montserrat_28, C_WHITE, "--");
-    lv_obj_align_to(rg->val, arc, LV_ALIGN_CENTER, 0, -6);
-    rg->sub = mklabel(s_scr, &lv_font_montserrat_14, C_DIM, "");
-    lv_obj_align_to(rg->sub, arc, LV_ALIGN_CENTER, 0, 16);
+    // children of the arc, aligned once: LVGL re-centres them when the text changes
+    rg->val = mklabel(arc, &lv_font_montserrat_28, C_WHITE, "--");
+    lv_obj_align(rg->val, LV_ALIGN_CENTER, 0, -6);
+    rg->sub = mklabel(arc, &lv_font_montserrat_14, C_DIM, "");
+    lv_obj_align(rg->sub, LV_ALIGN_CENTER, 0, 16);
 
     // TOP_MID centers at x=240; offset by (cx-240) to sit under this ring
     lv_obj_t *t = mklabel(s_scr, &lv_font_montserrat_16, C_DIM, title);
@@ -112,7 +104,7 @@ static lv_obj_t *make_tile(int x, int y, int w, int h, const char *label)
 
 // Title precedence: the saved name, else the Spark's hostname from the feed,
 // else a generic label until the first sample arrives.
-static char s_saved_name[TITLE_MAX + 1];
+static char s_saved_name[UI_TITLE_MAX + 1];
 
 static void refresh_title(void)
 {
@@ -146,7 +138,9 @@ void ui_init(const char *name)
     lv_obj_set_style_radius(s_dot, 7, 0);
     lv_obj_set_style_bg_opa(s_dot, LV_OPA_COVER, 0);
     s_livetext = mklabel(s_scr, &lv_font_montserrat_16, C_DIM, "WAITING");
+    lv_obj_align(s_livetext, LV_ALIGN_TOP_RIGHT, -22, 22);
     s_srctext = mklabel(s_scr, &lv_font_montserrat_14, C_DIM, "");
+    lv_obj_align(s_srctext, LV_ALIGN_TOP_RIGHT, -22, 46);
 
     make_ring(&s_cpu, 92, 150, 58, "CPU");
     make_ring(&s_gpu, 240, 150, 58, "GPU");
@@ -172,8 +166,7 @@ void ui_init(const char *name)
 static void layout_cells(int n)
 {
     const int x0 = 22, y = 276, h = 30, gap = 3, right = 480 - 22;
-    int w = n > 0 ? (right - x0 - gap * (n - 1)) / n : 0;
-    if (w < 6) w = 6;
+    int w = n ? (right - x0 - gap * (n - 1)) / n : 0;   // n <= 32 keeps w >= 10
     for (int i = 0; i < SPARK_MAX_CORES; i++) {
         bool show = i < n;
         if (show) {
@@ -192,7 +185,6 @@ static void set_ring(ring_t *rg, int32_t pct, bool fresh)
     lv_arc_set_value(rg->arc, known ? pct : 0);
     if (known) snprintf(buf, sizeof(buf), "%d%%", (int)pct);
     lv_label_set_text(rg->val, known ? buf : "--");
-    lv_obj_align_to(rg->val, rg->arc, LV_ALIGN_CENTER, 0, -6);
     lv_obj_set_style_arc_color(rg->arc, fresh ? C_GREEN : C_TRACK, LV_PART_INDICATOR);
 }
 
@@ -224,36 +216,34 @@ void ui_update(void)
     lv_label_set_text(s_livetext, txt);
     lv_obj_set_style_text_color(s_livetext, col, 0);
     lv_obj_set_style_bg_color(s_dot, col, 0);
-    lv_obj_align(s_livetext, LV_ALIGN_TOP_RIGHT, -22, 22);
-    lv_obj_align_to(s_dot, s_livetext, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    lv_obj_align_to(s_dot, s_livetext, LV_ALIGN_OUT_LEFT_MID, -10, 0);   // after the text's new width
     lv_label_set_text(s_srctext, !fresh ? "" :
                       g_spark.source == SRC_WIFI ? "via WI-FI" : "via USB");
-    lv_obj_align(s_srctext, LV_ALIGN_TOP_RIGHT, -22, 46);
 
-    set_ring(&s_cpu, g_spark.valid ? g_spark.cpu : SPARK_UNKNOWN, fresh);
-    set_ring(&s_gpu, g_spark.valid ? g_spark.gpu : SPARK_UNKNOWN, fresh);
-    set_ring(&s_mem, g_spark.valid ? spark_mem_pct() : SPARK_UNKNOWN, fresh);
-    if (g_spark.valid && spark_mem_pct() != SPARK_UNKNOWN) {
+    // fields are SPARK_UNKNOWN until the first sample, so no per-field `valid` checks
+    set_ring(&s_cpu, g_spark.cpu, fresh);
+    set_ring(&s_gpu, g_spark.gpu, fresh);
+    set_ring(&s_mem, spark_mem_pct(), fresh);
+    if (spark_mem_pct() != SPARK_UNKNOWN) {
         // decimal GB, rounded — matches NVIDIA's dashboard ("99 GB of 131 GB")
-        snprintf(buf, sizeof(buf), "%ld/%ldG", (long)((g_spark.mem_used_mb + 500) / 1000),
-                 (long)((g_spark.mem_total_mb + 500) / 1000));
+        snprintf(buf, sizeof(buf), "%ld/%ldG", (long)((g_spark.mem_used_mb + 500LL) / 1000),
+                 (long)((g_spark.mem_total_mb + 500LL) / 1000));
         lv_label_set_text(s_mem.sub, buf);
     } else {
         lv_label_set_text(s_mem.sub, "");
     }
-    lv_obj_align_to(s_mem.sub, s_mem.arc, LV_ALIGN_CENTER, 0, 16);
 
-    if (g_spark.valid && g_spark.ncores != s_ncells) layout_cells(g_spark.ncores);
+    if (g_spark.ncores != s_ncells) layout_cells(g_spark.ncores);
     for (int i = 0; i < s_ncells; i++)
         lv_obj_set_style_bg_color(s_cells[i], fresh ? heat_color(g_spark.cores[i]) : C_TRACK, 0);
 
-    if (g_spark.valid && g_spark.temp_c != SPARK_UNKNOWN) {
+    if (g_spark.temp_c != SPARK_UNKNOWN) {
         snprintf(buf, sizeof(buf), "%d\xC2\xB0", (int)g_spark.temp_c);   // degree sign
         lv_label_set_text(s_temp_val, buf);
     } else {
         lv_label_set_text(s_temp_val, "--");
     }
-    if (g_spark.valid && g_spark.power_dw != SPARK_UNKNOWN) {
+    if (g_spark.power_dw != SPARK_UNKNOWN) {
         snprintf(buf, sizeof(buf), "%d.%d W", (int)(g_spark.power_dw / 10), (int)(g_spark.power_dw % 10));
         lv_label_set_text(s_pow_val, buf);
     } else {

@@ -7,6 +7,7 @@ stubbed when it isn't installed, so `make check` runs anywhere.
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -23,7 +24,11 @@ try:
     import serial  # noqa: F401
 except ImportError:                       # minimal stand-in so the modules import
     fake = types.ModuleType("serial")
-    fake.Serial = object
+    fake.SerialException = OSError
+
+    def _no_port(*a, **k):
+        raise OSError("no such port")
+    fake.Serial = _no_port
     fake.tools = types.ModuleType("serial.tools")
     fake.tools.list_ports = types.ModuleType("serial.tools.list_ports")
     fake.tools.list_ports.comports = lambda: []
@@ -111,9 +116,9 @@ class SamplerTest(unittest.TestCase):
 
     def test_gpu_reader_goes_stale(self):
         g = agent.GpuReader(threading.Event())
-        g.values, g.at = (1, 2, 3), time.monotonic()
+        g.reading = ((1, 2, 3), time.monotonic())
         self.assertEqual(g.latest(), (1, 2, 3))
-        g.at -= agent.GPU_STALE_S + 1
+        g.reading = ((1, 2, 3), time.monotonic() - agent.GPU_STALE_S - 1)
         self.assertEqual(g.latest(), (None, None, None))
 
 
@@ -121,11 +126,9 @@ class HttpTest(unittest.TestCase):
     def setUp(self):
         from http.server import ThreadingHTTPServer
         self.sampler = agent.Sampler.__new__(agent.Sampler)
-        self.sampler.lock = threading.Lock()
-        self.sampler.line, self.sampler.at = "stat 1 2 3 4 5 6 7 h", time.monotonic()
-        self.sampler.sample = {"cpu": 1}
-        status = agent.DisplayStatus()
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler(self.sampler, status))
+        self.sampler.snap = ("stat 1 2 3 4 5 6 7 h", time.monotonic(), {"cpu": 1})
+        self.sampler.display = "not connected"
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler(self.sampler))
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -147,7 +150,8 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(headers["Content-Length"], str(len(body)))   # firmware requires it
 
     def test_stale_is_503(self):
-        self.sampler.at -= agent.STALE_S + 1
+        line, at, sample = self.sampler.snap
+        self.sampler.snap = (line, at - agent.STALE_S - 1, sample)
         self.assertEqual(self.get("/stat")[0], 503)
 
     def test_healthz_json(self):
@@ -220,6 +224,13 @@ class AgentHandshakeTest(unittest.TestCase):
         self.assertFalse(agent.handshake(BootingBoard(deaf=10**6), timeout=0.3, every=0.05))
 
 
+class ChunkedSerial(FakeSerial):
+    """Hands its output over a few bytes per read, the way USB packets arrive."""
+
+    def read(self, n):
+        return super().read(min(n, 5))
+
+
 def link_with(replies):
     link = sparklink.Link.__new__(sparklink.Link)
     link.port, link.ser = "/dev/fake", FakeSerial(replies)
@@ -227,11 +238,32 @@ def link_with(replies):
 
 
 class LinkTest(unittest.TestCase):
-    def test_end_patterns(self):
-        self.assertEqual(sparklink.end_pattern("status"), "STATUS-END")
-        self.assertEqual(sparklink.end_pattern("wifi"), "NET-END")
-        self.assertEqual(sparklink.end_pattern("wifi scan"), "SCAN-END")
-        self.assertEqual(sparklink.end_pattern('wifi ssids "a"'), r"^(OK|ERR)\b")
+    def test_end_markers(self):
+        def ends(cmd, line):
+            return bool(re.search(sparklink.end_pattern(cmd), line, re.M))
+        self.assertTrue(ends("status", "STATUS-END"))
+        self.assertTrue(ends("wifi", "NET-END"))
+        self.assertTrue(ends("wifi scan", "SCAN-END"))
+        self.assertFalse(ends("wifi scan", "NET-END"))
+        self.assertTrue(ends('wifi ssids "a"', "OK wifi ssids"))
+        self.assertTrue(ends("shot", "ERR lock"))          # a multi-line reply can end early...
+        self.assertFalse(ends("shot", "ERR+r0w/base64"))   # ...but a base64 row never ends it
+
+    def test_shot_reports_the_firmwares_error_at_once(self):
+        link = link_with(lambda c: "ERR lock\r\n")
+        with self.assertRaises(sparklink.LinkError) as e:
+            devctl.parse_shot(link.raw("shot", timeout=2))
+        self.assertEqual(str(e.exception), "ERR lock")
+
+    def test_verdict_split_across_reads_is_read_whole(self):
+        link = sparklink.Link.__new__(sparklink.Link)
+        link.port = "/dev/fake"
+        link.ser = ChunkedSerial(lambda c: "ERR wifi pass invalid (8-63 chars)\r\n")
+        self.assertEqual(link.cmd("wifi pass x"), ["ERR wifi pass invalid (8-63 chars)"])
+
+    def test_unopenable_port_is_a_link_error(self):
+        with self.assertRaises(sparklink.LinkError):
+            sparklink.Link("/dev/sparkesp32-no-such-port")
 
     def test_echo_and_console_footer_are_not_the_reply(self):
         link = link_with(lambda c: "ERR stat cpu\r\nCommand returned non-zero error code: 0x1 (ERROR)\r\n")

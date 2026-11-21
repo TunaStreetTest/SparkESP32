@@ -107,8 +107,9 @@ class GpuReader(threading.Thread):
 
     def __init__(self, stop):
         super().__init__(daemon=True, name="gpu")
-        self.stop, self.lock = stop, threading.Lock()
-        self.values, self.at, self.state = (None, None, None), 0.0, "starting"
+        self.stop, self.state = stop, "starting"
+        self.reading = ((None, None, None), 0.0)   # (values, monotonic time); replaced whole
+        self.first = threading.Event()             # set by the first reading
 
     @staticmethod
     def _num(s, scale=1.0):
@@ -125,38 +126,34 @@ class GpuReader(threading.Thread):
                                         text=True, bufsize=1)
             except OSError as e:
                 self.state = f"nvidia-smi unavailable: {e}"
-                rl.warn("gpu-spawn", "%s; GPU fields will show --", self.state)
-                self.stop.wait(min(backoff, 60))
-                backoff *= 2
-                continue
-            self.state = "ok"
-            for line in proc.stdout:
-                f = line.split(",")
-                if len(f) == 3:
-                    with self.lock:
-                        self.values = (self._num(f[0]), self._num(f[1]), self._num(f[2], 10))
-                        self.at = time.monotonic()
-                    backoff = 1.0
-                if self.stop.is_set():
-                    break
-            proc.kill()
-            err = (proc.stderr.read() or "").strip().splitlines()
-            self.state = f"nvidia-smi exited ({proc.wait()}): {err[-1] if err else 'no output'}"
-            if not self.stop.is_set():
-                rl.warn("gpu-exit", "%s; restarting", self.state)
-                self.stop.wait(min(backoff, 60))
-                backoff *= 2
+            else:
+                self.state = "ok"
+                for line in proc.stdout:
+                    f = line.split(",")
+                    if len(f) == 3:
+                        values = (self._num(f[0]), self._num(f[1]), self._num(f[2], 10))
+                        self.reading = (values, time.monotonic())
+                        self.first.set()
+                        backoff = 1.0
+                    if self.stop.is_set():
+                        break
+                proc.kill()
+                err = (proc.stderr.read() or "").strip().splitlines()
+                self.state = f"nvidia-smi exited ({proc.wait()}): {err[-1] if err else 'no output'}"
+            if self.stop.is_set():
+                break
+            rl.warn("gpu", "%s; GPU fields show -- until it's back", self.state)
+            self.stop.wait(min(backoff, 60))
+            backoff *= 2
 
     def latest(self):
         """(gpu_pct, temp_c, power_dw), each None when unknown or stale."""
-        with self.lock:
-            if time.monotonic() - self.at > GPU_STALE_S:
-                return None, None, None
-            return self.values
+        values, at = self.reading
+        return values if time.monotonic() - at <= GPU_STALE_S else (None, None, None)
 
 
 def fmt(v):
-    return "-" if v is None else str(int(v))
+    return "-" if v is None else str(v)
 
 
 def short_hostname():
@@ -167,12 +164,14 @@ def short_hostname():
 
 
 class Sampler:
-    """Owns the latest stat line; refreshed once per interval."""
+    """The latest stat line, refreshed once per interval, and the display link's
+    status, both read by the HTTP handler. Each is replaced whole, never mutated,
+    so readers need no lock."""
 
     def __init__(self, gpu):
-        self.gpu, self.lock = gpu, threading.Lock()
-        self.line, self.at, self.sample = None, 0.0, {}
-        self.host = short_hostname()
+        self.gpu, self.host = gpu, short_hostname()
+        self.snap = (None, 0.0, {})          # (line, monotonic time of it, /healthz fields)
+        self.display = "not connected"
         self._prev = read_cpu_times()
 
     def tick(self):
@@ -185,21 +184,19 @@ class Sampler:
         gpu, temp, pow_dw = self.gpu.latest()
         line = (f"stat {cpu} {fmt(gpu)} {memu} {memt} {fmt(temp)} {fmt(pow_dw)} "
                 f"{','.join(map(str, cores)) or '-'} {self.host}")
-        with self.lock:
-            self.line, self.at = line, time.monotonic()
-            self.sample = dict(host=self.host, cpu=cpu, gpu=gpu, mem_used_mb=memu, mem_total_mb=memt,
-                               temp_c=temp, power_w=None if pow_dw is None else pow_dw / 10,
-                               cores=cores, gpu_source=self.gpu.state)
+        sample = dict(host=self.host, cpu=cpu, gpu=gpu, mem_used_mb=memu, mem_total_mb=memt,
+                      temp_c=temp, power_w=None if pow_dw is None else pow_dw / 10,
+                      cores=cores, gpu_source=self.gpu.state)
+        self.snap = (line, time.monotonic(), sample)
 
     def latest(self):
         """(line, at, sample); `at` is the monotonic time of that line."""
-        with self.lock:
-            return self.line, self.at, dict(self.sample)
+        return self.snap
 
 
 # ---------------------------------------------------------------- HTTP
 
-def make_handler(sampler, status):
+def make_handler(sampler):
     class Handler(BaseHTTPRequestHandler):
         timeout = 5                     # idle clients can't pin a thread forever
         server_version = f"sparkesp32-agent/{__version__}"
@@ -223,7 +220,7 @@ def make_handler(sampler, status):
                 else:
                     self._send(200, line + "\n")
             elif path == "/healthz":
-                body = dict(version=__version__, age_s=round(age, 2), display=status.get(), **sample)
+                body = dict(version=__version__, age_s=round(age, 2), display=sampler.display, **sample)
                 self._send(200, json.dumps(body) + "\n", "application/json")
             else:
                 self._send(404, "try /stat or /healthz\n")
@@ -235,19 +232,6 @@ def make_handler(sampler, status):
 
 
 # ---------------------------------------------------------------- serial
-
-class DisplayStatus:
-    def __init__(self):
-        self.lock, self.value = threading.Lock(), "not connected"
-
-    def set(self, v):
-        with self.lock:
-            self.value = v
-
-    def get(self):
-        with self.lock:
-            return self.value
-
 
 def candidate_ports():
     return sorted(p.device for p in serial.tools.list_ports.comports()
@@ -273,7 +257,7 @@ def handshake(ser, timeout=HANDSHAKE_S, every=1.0):
     return False
 
 
-def serial_loop(sampler, explicit_port, status, stop):
+def serial_loop(sampler, explicit_port, stop):
     """Push each fresh sample to the display; survive unplug/replug."""
     ser, last_at, rejected = None, 0.0, {}
     while not stop.is_set():
@@ -297,7 +281,7 @@ def serial_loop(sampler, explicit_port, status, stop):
                     ser, rejected[port] = None, now + 300
                     continue
                 log.info("display connected on %s (answered in %.1fs)", port, time.monotonic() - t0)
-                status.set(f"connected on {port}")
+                sampler.display = f"connected on {port}"
             line, at, _ = sampler.latest()
             if line and at != last_at:
                 ser.write((line + "\n").encode())
@@ -315,7 +299,7 @@ def serial_loop(sampler, explicit_port, status, stop):
             else:
                 rl.warn("serial-open", "can't open the display's port: %s", e)
             ser = None
-            status.set("not connected")
+            sampler.display = "not connected"
             stop.wait(2)
 
 
@@ -332,10 +316,8 @@ def main():
     ap.add_argument("--no-http", action="store_true", help="USB only")
     ap.add_argument("--once", action="store_true", help="print one stat line and exit")
     ap.add_argument("--version", action="version", version=__version__)
-    ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -344,18 +326,16 @@ def main():
     gpu = GpuReader(stop)
     gpu.start()
     sampler = Sampler(gpu)
-    status = DisplayStatus()
+    gpu.first.wait(2)              # so the first line already has GPU values, not "-"
+    sampler.tick()
 
     if args.once:
-        time.sleep(max(args.interval, 1.5))     # let nvidia-smi report once
-        sampler.tick()
         print(sampler.latest()[0])
         stop.set()
         return 0
 
-    sampler.tick()
     if not args.no_http:
-        httpd = ThreadingHTTPServer((args.bind, args.http_port), make_handler(sampler, status))
+        httpd = ThreadingHTTPServer((args.bind, args.http_port), make_handler(sampler))
         httpd.daemon_threads = True
         threading.Thread(target=httpd.serve_forever, daemon=True, name="http").start()
         log.info("serving /stat on http://%s:%d", args.bind, args.http_port)
@@ -363,7 +343,7 @@ def main():
         if serial is None:
             log.warning("pyserial missing: USB output disabled")
         else:
-            threading.Thread(target=serial_loop, args=(sampler, args.port, status, stop),
+            threading.Thread(target=serial_loop, args=(sampler, args.port, stop),
                              daemon=True, name="serial").start()
 
     while not stop.wait(args.interval):

@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-esp_err_t net_start(void);          // after settings_init(); starts the supervisor/poll task
+void      net_start(void);          // after settings_init(); starts the supervisor/poll task
 
 bool net_wifi_configured(void);     // at least one SSID
 bool net_wifi_is_connected(void);

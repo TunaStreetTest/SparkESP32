@@ -55,9 +55,10 @@ def main():
     ap.add_argument("--port", help="serial port (default: autodetect the display)")
     ap.add_argument("--name", help='fixed header title, e.g. "Lab Spark" (max 24 chars); '
                                    '"" = show the Spark\'s hostname (the default)')
-    ap.add_argument("--host", help=f"Spark hostname or IP for Wi-Fi mode; sets the agent URL to "
-                                   f"http://HOST:{AGENT_PORT}/stat")
-    ap.add_argument("--url", help="full agent URL instead of --host (http:// only)")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--host", help=f"Spark hostname or IP for Wi-Fi mode; sets the agent URL to "
+                                      f"http://HOST:{AGENT_PORT}/stat")
+    where.add_argument("--url", help="full agent URL instead of --host (http:// only)")
     ap.add_argument("--ssids", help="Wi-Fi network name(s), comma-separated, tried in order (max 4)")
     pw = ap.add_mutually_exclusive_group()
     pw.add_argument("--password-env", metavar="VAR", help="read the Wi-Fi password from $VAR")
@@ -68,8 +69,6 @@ def main():
     ap.add_argument("--clear-wifi", action="store_true", help="forget SSIDs, password and URL")
     a = ap.parse_args()
 
-    if a.host and a.url:
-        ap.error("use --host or --url, not both")
     if (a.password_env or a.password_stdin or a.open) and not a.ssids:
         ap.error("a password option needs --ssids")
     if a.clear_wifi and (a.ssids or a.host or a.url):
@@ -107,8 +106,6 @@ def main():
                     print(line)
     except LinkError as e:
         sys.exit(f"error: {e}")
-    finally:
-        password = None
     return 0
 
 

@@ -5,8 +5,6 @@
 // Spark) and served at GET /stat (board on the same Wi-Fi LAN, polled by
 // net.c). USB wins while fresh. When the feed stops, the screen says so.
 
-#include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -37,9 +35,8 @@ static display_rot_t saved_rotation(void)
 {
     char r[8];
     settings_get("rot", r, sizeof(r), "cw");   // cw: upright with the USB-C on the right
-    if (!strcmp(r, "none")) return DISPLAY_ROT_NONE;
-    if (!strcmp(r, "ccw")) return DISPLAY_ROT_CCW;
-    return DISPLAY_ROT_CW;
+    int rot = display_rot_from_name(r);
+    return rot < 0 ? DISPLAY_ROT_CW : (display_rot_t)rot;
 }
 
 void app_main(void)
@@ -57,7 +54,7 @@ void app_main(void)
     ESP_ERROR_CHECK(board_init());
     ESP_ERROR_CHECK(display_start(saved_rotation()));
 
-    char name[25];
+    char name[UI_TITLE_MAX + 1];
     settings_get("name", name, sizeof(name), "");
     if (display_lock(-1) == ESP_OK) {
         ui_init(name);

@@ -10,7 +10,7 @@
 # it only reflashes when the board's firmware differs from this release, and it
 # only fills in settings that are unset unless you pass them explicitly.
 # Run ./install.sh --help for every option.
-set -euo pipefail
+set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="$(head -n1 "$HERE/VERSION")"
@@ -50,6 +50,10 @@ EOF
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+# set -e alone exits without a word; say where (once: not again from inside a $(...)).
+trap '[ "$BASH_SUBSHELL" -gt 0 ] || die "unexpected failure at line $LINENO: $BASH_COMMAND"' ERR
+
+ARGS=""; [ $# -eq 0 ] || printf -v ARGS ' %q' "$@"    # for the "run with sudo" hint
 
 NAME="" NAME_SET="" HOST="" SSIDS="" PW_ENV="" OPEN_WIFI="" CLEAR_WIFI="" NO_WIFI="" ROTATION=""
 FW_DIR="" NO_FLASH="" REFLASH="" PORT="" LAN_CIDR="" YES="" UNINSTALL=""
@@ -76,37 +80,25 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ "$(id -u)" -eq 0 ] || die "run with sudo: sudo $0 $*"
+[ "$(id -u)" -eq 0 ] || die "run with sudo: sudo $0$ARGS"
 interactive() { [ -z "$YES" ] && [ -t 0 ]; }
 
 # ------------------------------------------------------------------ cleanup
 
 ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; }
 
-ufw_delete_ours() {   # rules tagged by this installer or the pre-rename "sparkstat" one
+ufw_delete_ours() {   # the rule this installer tags "sparkesp32"
     ufw_active || return 0
     local n
-    for n in $(ufw status numbered | sed -En 's/^\[ *([0-9]+)\].*# (sparkesp32|sparkstat) *$/\1/p' | sort -rn); do
+    for n in $(ufw status numbered | sed -En 's/^\[ *([0-9]+)\].*# sparkesp32 *$/\1/p' | sort -rn); do
         ufw --force delete "$n" >/dev/null
     done
-}
-
-remove_legacy() {     # the project's pre-release name; harmless if never installed
-    if [ -e /etc/systemd/system/sparkstat.service ]; then
-        say "removing the old sparkstat service"
-        systemctl disable --now sparkstat.service 2>/dev/null || true
-        rm -f /etc/systemd/system/sparkstat.service /usr/local/bin/sparkstat-agent \
-              /etc/udev/rules.d/99-sparkstat.rules
-        rm -rf /usr/local/share/doc/sparkstat
-        systemctl daemon-reload
-    fi
 }
 
 if [ -n "$UNINSTALL" ]; then
     say "uninstalling SparkESP32"
     systemctl disable --now sparkesp32.service 2>/dev/null || true
     rm -f "$UNIT" "$RULES"
-    remove_legacy
     ufw_delete_ours
     rm -rf "$OPT"
     systemctl daemon-reload
@@ -130,11 +122,19 @@ if [ -n "$PW_ENV" ] && [ -z "${!PW_ENV+x}" ]; then
 fi
 
 TMPD="$(mktemp -d)"
-trap 'rm -rf "$TMPD"' EXIT
+RESTORE_AGENT=""
+cleanup() {
+    rm -rf "$TMPD"
+    # a run that fails part-way must not leave the display dark: restart the agent we stopped
+    [ -z "$RESTORE_AGENT" ] || systemctl start sparkesp32.service 2>/dev/null || true
+}
+trap cleanup EXIT
 
 say "SparkESP32 $VERSION for $(hostname -s), agent runs as $RUN_USER"
-remove_legacy
-systemctl stop sparkesp32.service 2>/dev/null || true    # frees the serial port + :$HTTP_PORT
+if systemctl is-active --quiet sparkesp32.service; then
+    RESTORE_AGENT=1
+    systemctl stop sparkesp32.service       # frees the serial port + :$HTTP_PORT
+fi
 
 # ------------------------------------------------------------------ files + venv
 
@@ -158,15 +158,6 @@ if [ -z "$PORT" ]; then
     PORT="${PORTS[0]:-}"
 fi
 
-app_version() {      # the version string baked into an app image (esp_app_desc_t)
-    "$PY" - "$1" <<'EOF'
-import struct, sys
-b = open(sys.argv[1], "rb").read(256)
-ok = len(b) >= 80 and struct.unpack_from("<I", b, 32)[0] == 0xABCD5432
-print(b[48:80].split(b"\0")[0].decode() if ok else "")
-EOF
-}
-
 firmware_dir() {     # echo a dir holding the three images for $VERSION, fetching if needed
     local d
     for d in "$FW_DIR" "$HERE/dist/sparkesp32-firmware-$VERSION"; do
@@ -189,6 +180,7 @@ firmware_dir() {     # echo a dir holding the three images for $VERSION, fetchin
 
 DEV_STATUS=""
 read_status() { DEV_STATUS="$(devctl status 2>/dev/null)" || DEV_STATUS=""; }
+board_version() { sed -n 's/^fw=sparkesp32 version=\([^ ]*\).*/\1/p' <<<"$DEV_STATUS"; }
 
 if [ -z "$PORT" ]; then
     warn "no display on USB: skipping flash + setup. Plug it into this Spark and re-run,"
@@ -196,14 +188,12 @@ if [ -z "$PORT" ]; then
 else
     say "display found on $PORT"
     read_status
-    BOARD_VER="$(sed -n 's/^fw=sparkesp32 version=\([^ ]*\).*/\1/p' <<<"$DEV_STATUS")"
+    BOARD_VER="$(board_version)"
     if [ -n "$NO_FLASH" ]; then
         [ -n "$BOARD_VER" ] || warn "the board isn't running SparkESP32 firmware and --no-flash was given"
     elif [ -n "$REFLASH" ] || [ "$BOARD_VER" != "$VERSION" ]; then
         FW="$(firmware_dir)"
-        IMG_VER="$(app_version "$FW/sparkesp32.bin")"
-        [ "$IMG_VER" = "$VERSION" ] || warn "firmware image is version '${IMG_VER:-?}', expected $VERSION"
-        say "flashing firmware ${IMG_VER:-?} (board had: ${BOARD_VER:-other firmware})"
+        say "flashing firmware $VERSION (board had: ${BOARD_VER:-other firmware})"
         # Split images, never a merged one: a merged image overwrites the NVS
         # partition and the board would forget its Wi-Fi and name.
         "$PY" -m esptool --chip esp32c6 -p "$PORT" -b 460800 --before default_reset --after hard_reset \
@@ -212,6 +202,8 @@ else
             || die "flashing failed; hold BOOT while plugging in the board, then re-run"
         for _ in 1 2 3; do sleep 1; read_status; [ -n "$DEV_STATUS" ] && break; done   # each try waits 10 s
         [ -n "$DEV_STATUS" ] || die "the board didn't answer after flashing"
+        [ "$(board_version)" = "$VERSION" ] ||
+            warn "the board now runs '$(board_version)', not $VERSION: was $FW built from another version?"
     else
         say "board already runs $VERSION"
     fi
@@ -232,9 +224,13 @@ if [ -n "$PORT" ] && [ -n "$DEV_STATUS" ]; then
         if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
             HOST="$(hostname -s).local"
         else
-            HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
-            warn "avahi (mDNS) isn't running, so the display will poll $HOST directly;"
-            warn "give this Spark a DHCP reservation or re-run with --host if that address changes"
+            HOST="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')" || HOST=""
+            if [ -n "$HOST" ]; then
+                warn "avahi (mDNS) isn't running, so the display will poll $HOST directly;"
+                warn "give this Spark a DHCP reservation or re-run with --host if that address changes"
+            else
+                warn "couldn't work out this Spark's LAN address; re-run with --host for Wi-Fi mode"
+            fi
         fi
     fi
     [ -n "$HOST" ] && args+=(--host "$HOST")
@@ -247,7 +243,7 @@ if [ -n "$PORT" ] && [ -n "$DEV_STATUS" ]; then
         echo "into this Spark (it polls this Spark's agent on your LAN). The ESP32-C6 only"
         echo "sees 2.4 GHz networks. Networks it can see right now:"
         devctl wifi scan 2>/dev/null | sed -n "s/^ap ssid='\(.\{1,\}\)' chan=.* rssi=\(-\{0,1\}[0-9]*\).*/\1|\2/p" |
-            sort -t'|' -k2,2nr | awk -F'|' '!seen[$1]++ { printf "    %-32s %s dBm\n", $1, $2 }' | head -12
+            sort -t'|' -k2,2nr | awk -F'|' '!seen[$1]++ { printf "    %-32s %s dBm\n", $1, $2 }' | head -12 || true
         HERE_SSID="$(nmcli -t -f active,ssid dev wifi 2>/dev/null | sed -n 's/^yes://p' | head -n1 || true)"
         [ -n "$HERE_SSID" ] && echo "(this Spark is on \"$HERE_SSID\")"
         read -r -p "Network name(s) for the display, comma-separated (Enter to skip): " SSIDS
@@ -277,10 +273,12 @@ sed "s/@RUN_USER@/$RUN_USER/" "$HERE/agent/sparkesp32.service" > "$UNIT"
 systemctl daemon-reload
 systemctl enable --quiet sparkesp32.service
 systemctl restart sparkesp32.service
+RESTORE_AGENT=""
 
 if [ -z "$LAN_CIDR" ]; then
-    dev="$(ip -4 route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
-    addr="$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4; exit}')"
+    dev="$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')" || dev=""
+    addr=""
+    [ -z "$dev" ] || addr="$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4; exit}')" || addr=""
     LAN_CIDR="$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$addr" 2>/dev/null || true)"
 fi
 if ufw_active; then
@@ -296,13 +294,12 @@ fi
 # ------------------------------------------------------------------ verify
 
 say "checking"
-ok=""
-for _ in $(seq 1 15); do
-    sleep 1
-    curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/stat" 2>/dev/null | grep -q '^stat ' && { ok=1; break; }
-done
-[ -n "$ok" ] || { systemctl --no-pager --lines=15 status sparkesp32.service >&2 || true; die "the agent isn't serving /stat"; }
-echo "    $(curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/stat")"
+# the retries cover the agent still starting (connection refused) and a stale-sample 503
+line="$(curl -fsS -m2 --retry 15 --retry-delay 1 --retry-connrefused "http://127.0.0.1:$HTTP_PORT/stat" 2>/dev/null)" || line=""
+case "$line" in
+    "stat "*) echo "    $line" ;;
+    *) systemctl --no-pager --lines=15 status sparkesp32.service >&2 || true; die "the agent isn't serving /stat" ;;
+esac
 display="not connected"
 if [ -n "$PORT" ]; then
     for _ in $(seq 1 10); do

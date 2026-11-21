@@ -33,8 +33,6 @@
 #include "lvgl_private.h"
 #include "mbedtls/base64.h"
 
-#define TITLE_MAX 24
-
 // ---------------------------------------------------------------- shot
 
 static lv_display_flush_cb_t s_orig_flush;
@@ -115,7 +113,7 @@ static int cmd_name(int argc, char **argv)
 {
     if (argc != 2) { printf("ERR usage: name \"<text>\"\n"); return 1; }
     const char *n = argv[1];
-    if (strlen(n) > TITLE_MAX) { printf("ERR name longer than %d chars\n", TITLE_MAX); return 1; }
+    if (strlen(n) > UI_TITLE_MAX) { printf("ERR name longer than %d chars\n", UI_TITLE_MAX); return 1; }
     for (const char *c = n; *c; c++)
         if (!isprint((unsigned char)*c)) { printf("ERR name must be printable ASCII\n"); return 1; }
     if (settings_set("name", n) != ESP_OK) { printf("ERR name save\n"); return 1; }
@@ -124,26 +122,13 @@ static int cmd_name(int argc, char **argv)
     return 0;
 }
 
-static int parse_rot(const char *s)
-{
-    if (!strcmp(s, "none")) return DISPLAY_ROT_NONE;
-    if (!strcmp(s, "ccw")) return DISPLAY_ROT_CCW;
-    if (!strcmp(s, "cw")) return DISPLAY_ROT_CW;
-    return -1;
-}
-
-static const char *rot_name(display_rot_t r)
-{
-    return r == DISPLAY_ROT_CCW ? "ccw" : r == DISPLAY_ROT_CW ? "cw" : "none";
-}
-
 static int cmd_rot(int argc, char **argv)
 {
-    if (argc < 2) { printf("OK rot %s\n", rot_name(display_get_rotation())); return 0; }
-    int r = parse_rot(argv[1]);
+    if (argc < 2) { printf("OK rot %s\n", display_rot_name(display_get_rotation())); return 0; }
+    int r = display_rot_from_name(argv[1]);
     if (r < 0) { printf("ERR usage: rot none|ccw|cw\n"); return 1; }
-    if (settings_set("rot", argv[1]) != ESP_OK) { printf("ERR rot save\n"); return 1; }
     if (display_lock(5000) != ESP_OK) { printf("ERR lock\n"); return 1; }
+    if (settings_set("rot", argv[1]) != ESP_OK) { display_unlock(); printf("ERR rot save\n"); return 1; }
     display_set_rotation((display_rot_t)r);
     lv_obj_invalidate(lv_screen_active());
     lv_refr_now(lv_display_get_default());
@@ -156,6 +141,10 @@ static int cmd_wifi(int argc, char **argv)
 {
     const char *sub = argc > 1 ? argv[1] : "show";
     esp_err_t err;
+    // The REPL added this line to its history before running it. For `pass`, drop
+    // it whatever happens next, so an up-arrow can't recall the passphrase, even
+    // from a mistyped command.
+    if (!strcmp(sub, "pass")) linenoiseHistoryFree();
     if (!strcmp(sub, "show")) { net_show(); return 0; }
     if (!strcmp(sub, "scan")) return net_scan_print() == ESP_OK ? 0 : 1;
     if (!strcmp(sub, "clear")) {
@@ -164,9 +153,6 @@ static int cmd_wifi(int argc, char **argv)
         err = net_set_ssids(argv[2]);
     } else if (argc == 3 && !strcmp(sub, "pass")) {
         err = net_set_pass(argv[2]);
-        // The REPL added this line to its history before running it; drop it
-        // so an up-arrow on the console can't recall the passphrase.
-        linenoiseHistoryFree();
     } else if (argc == 3 && !strcmp(sub, "url")) {
         err = net_set_url(argv[2]);
     } else {
@@ -202,11 +188,11 @@ static const char *fv(char buf[16], int32_t v)
 static int cmd_status(int argc, char **argv)
 {
     const esp_app_desc_t *app = esp_app_get_description();
-    char name[TITLE_MAX + 1];
+    char name[UI_TITLE_MAX + 1];
     settings_get("name", name, sizeof(name), "");
     printf("STATUS-BEGIN\n");
     printf("fw=sparkesp32 version=%s idf=%s\n", app->version, app->idf_ver);  // handshake line
-    printf("name='%s' rot=%s\n", name, rot_name(display_get_rotation()));
+    printf("name='%s' rot=%s\n", name, display_rot_name(display_get_rotation()));
     printf("heap_free=%u min=%u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
            (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT));
     printf("stack_free repl=%u net=%u tick=%u\n", (unsigned)uxTaskGetStackHighWaterMark(NULL),

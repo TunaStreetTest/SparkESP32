@@ -110,7 +110,8 @@ docs/                      protocol.md, troubleshooting.md
   `agent/sparkesp32_agent.py`, `tests/`, and `docs/protocol.md`. The console splits on
   spaces with a 32-token cap, so keep each sample to a few tokens.
 - Console replies always end in a line starting with `OK` or `ERR` (or a `*-END` marker
-  for multi-line output). `tools/sparklink.py` depends on that.
+  for multi-line output, which an `ERR ...` line can replace when the command can't run).
+  `tools/sparklink.py` depends on that.
 - Bump `VERSION` and `__version__` in the agent together (`make check` enforces it), and
   add a `CHANGELOG.md` entry.
 
