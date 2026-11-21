@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # stay on the esptool major that ESP-IDF v5.5 ships (install.sh's flash
+      # command is tested against it); move with the next ESP-IDF bump
+      - dependency-name: esptool
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
