@@ -200,12 +200,14 @@ static int cmd_status(int argc, char **argv)
     if (display_lock(2000) == ESP_OK) {
         spark_t s = g_spark;
         uint32_t age = spark_age_ms();
+        status_t st = ui_status();
         display_unlock();
         char b[6][16];
         printf("valid=%d age_ms=%ld src=%s host=%s cpu=%s gpu=%s mem=%s/%sMB temp=%s power_dw=%s "
                "cores=%d\n", s.valid, s.valid ? (long)age : -1L, spark_src_name(s.source),
                s.host[0] ? s.host : "-", fv(b[0], s.cpu), fv(b[1], s.gpu), fv(b[2], s.mem_used_mb),
                fv(b[3], s.mem_total_mb), fv(b[4], s.temp_c), fv(b[5], s.power_dw), s.ncores);
+        printf("screen=%s reason='%s'\n", screen_name(st.screen), st.reason);
     }
     printf("wifi configured=%d connected=%d url=%d\n", net_wifi_configured(),
            net_wifi_is_connected(), net_url_configured());

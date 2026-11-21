@@ -96,13 +96,18 @@ board you haven't set up yet, because it erases the saved settings.
 
 ## Reading the screen
 
-| Top right | Meaning |
-|---|---|
-| ● **ONLINE** · via USB / via WI-FI | a fresh sample arrived in the last 5 s |
-| ● **OFFLINE** | the link is fine, but the Spark stopped answering (asleep, off, agent down) |
-| ● **NO WI-FI** | Wi-Fi is configured but the board can't join it |
-| ● **SET HOST** | on Wi-Fi, but no agent address is set (`--host`) |
-| ● **WAITING** | nothing on USB and no Wi-Fi configured yet |
+| Top right | Second line | Meaning |
+|---|---|---|
+| ● **ONLINE** | via USB / via WI-FI | a fresh sample arrived in the last 5 s |
+| ● **OFFLINE** | agent stopped | the Spark answers, but nothing listens on :8787 |
+| | Spark unreachable | no answer at all: the Spark is asleep, off, or off the network |
+| | agent stale | the agent is up but its samples stopped |
+| | bad reply | something answered that isn't the agent (or an old one) |
+| ● **NO WI-FI** | joining... / no network / wrong password / can't join | Wi-Fi is configured but the board isn't on it |
+| ● **SET HOST** | | on Wi-Fi, but no agent address is set (`--host`) |
+| ● **WAITING** | | nothing on USB and no Wi-Fi configured yet |
+
+Over USB alone, OFFLINE has no second line: the board can't tell why samples stopped.
 
 Rings and the heatmap dim to grey whenever the data is stale. A reading the Spark can't
 provide (e.g. `nvidia-smi` missing) shows `--`.

@@ -66,6 +66,7 @@ name='Lab Spark' rot=cw
 heap_free=81160 min=72272
 stack_free repl=6344 net=7428 tick=4852
 valid=1 age_ms=412 src=usb host=spark-1a2b cpu=6 gpu=91 mem=46328/130661MB temp=60 power_dw=410 cores=20
+screen=online reason='via USB'
 wifi configured=1 connected=1 url=1
 STATUS-END
 ```

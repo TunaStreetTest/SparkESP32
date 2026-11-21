@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -43,8 +44,8 @@ import sparklink  # noqa: E402
 # ------------------------------------------------------------------ agent
 
 class FakeGpu:
-    def __init__(self, values=(91, 60, 410), state="ok"):
-        self.values, self.state = values, state
+    def __init__(self, values=(91, 60, 410), state="streaming"):
+        self.values, self.state, self.error = values, state, None
 
     def latest(self):
         return self.values
@@ -122,6 +123,53 @@ class SamplerTest(unittest.TestCase):
         self.assertEqual(g.latest(), (None, None, None))
 
 
+class GpuReaderLifecycleTest(unittest.TestCase):
+    """The real reader against stand-in nvidia-smi children."""
+
+    def watch(self, argv, done, timeout=6.0):
+        """Run a GpuReader on `argv` until done(states seen, in order) or timeout."""
+        saved = agent.NVSMI, agent.GPU_STALL_S
+        agent.NVSMI, agent.GPU_STALL_S = argv, 0.5
+        stop, seen = threading.Event(), []
+        g = agent.GpuReader(stop)
+        g.start()
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and not done(seen):
+                if not seen or seen[-1] != g.state:
+                    seen.append(g.state)
+                time.sleep(0.01)
+            return g, seen
+        finally:
+            stop.set()
+            g.join(3)
+            agent.NVSMI, agent.GPU_STALL_S = saved
+
+    @staticmethod
+    def child(code):
+        return [sys.executable, "-c", code]
+
+    def test_a_hung_nvidia_smi_is_killed_and_respawned(self):
+        hangs = self.child("import time; print('7, 41, 10.6', flush=True); time.sleep(60)")
+
+        def respawned(seen):
+            return "stalled" in seen and "streaming" in seen[seen.index("stalled"):]
+        g, seen = self.watch(hangs, respawned)
+        self.assertTrue(respawned(seen), seen)
+        self.assertEqual(g.reading[0], (7, 41, 106))
+
+    def test_an_exit_is_reported_with_its_stderr(self):
+        g, seen = self.watch(self.child("import sys; print('boom', file=sys.stderr); sys.exit(3)"),
+                             lambda seen: "exited" in seen)
+        self.assertIn("exited", seen)
+        self.assertEqual(g.error, "exit 3: boom")
+
+    def test_a_missing_nvidia_smi_is_unavailable(self):
+        g, seen = self.watch(["/nonexistent/nvidia-smi"], lambda seen: "unavailable" in seen)
+        self.assertIn("unavailable", seen)
+        self.assertIn("nvidia-smi", g.error)
+
+
 class HttpTest(unittest.TestCase):
     def setUp(self):
         from http.server import ThreadingHTTPServer
@@ -194,13 +242,14 @@ class BootingBoard:
     """A display whose console ignores its first `deaf` writes, like one still booting."""
 
     def __init__(self, deaf, fw=b"fw=sparkesp32 version=0.1.0"):
-        self.deaf, self.fw, self.out, self.writes = deaf, fw, b"", 0
+        self.deaf, self.fw, self.out, self.writes, self.sent = deaf, fw, b"", 0, b""
 
     def reset_input_buffer(self):
         self.out = b""
 
     def write(self, data):
         self.writes += 1
+        self.sent += data
         if self.writes > self.deaf:
             self.out += b"STATUS-BEGIN\r\n" + self.fw + b"\r\nSTATUS-END\r\n"
 
@@ -209,6 +258,13 @@ class BootingBoard:
         if not chunk:
             time.sleep(0.005)
         return chunk
+
+    @property
+    def in_waiting(self):
+        return len(self.out)
+
+    def close(self):
+        pass
 
 
 class AgentHandshakeTest(unittest.TestCase):
@@ -229,6 +285,48 @@ class ChunkedSerial(FakeSerial):
 
     def read(self, n):
         return super().read(min(n, 5))
+
+
+class SerialLoopTest(unittest.TestCase):
+    """The link states serial_loop publishes for /healthz, with stand-in ports and boards."""
+
+    def run_loop(self, open_port, done, timeout=4.0):
+        with tempfile.NamedTemporaryFile() as dev:     # a port path that exists, like a real node
+            saved = agent.candidate_ports, agent.serial.Serial, agent.HANDSHAKE_S
+            agent.candidate_ports, agent.serial.Serial, agent.HANDSHAKE_S = (
+                lambda: [dev.name]), open_port, 0.3
+            sampler = types.SimpleNamespace(display={"state": "searching"},
+                                            latest=lambda: ("stat 1 2 3 4 5 6 7 h", time.monotonic(), {}))
+            stop = threading.Event()
+            loop = threading.Thread(target=agent.serial_loop, args=(sampler, None, stop), daemon=True)
+            loop.start()
+            try:
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline and not done(sampler.display):
+                    time.sleep(0.01)
+                return sampler.display, dev.name
+            finally:
+                stop.set()
+                loop.join(3)
+                agent.candidate_ports, agent.serial.Serial, agent.HANDSHAKE_S = saved
+
+    def test_a_display_that_answers_is_streaming(self):
+        board = BootingBoard(deaf=0)
+        d, port = self.run_loop(lambda *a, **k: board, lambda d: d["state"] == "streaming")
+        self.assertEqual((d["state"], d["port"]), ("streaming", port))
+        self.assertGreaterEqual(d["answered_in_s"], 0)
+        self.assertIn(b"stat 1 2 3 4 5 6 7 h", board.sent)
+
+    def test_a_silent_device_is_reported_as_rejected(self):
+        d, port = self.run_loop(lambda *a, **k: BootingBoard(deaf=10**6), lambda d: d["state"] == "rejected")
+        self.assertEqual((d["state"], d["port"]), ("rejected", port))
+        self.assertGreater(d["retry_in_s"], agent.REJECT_S - 10)
+
+    def test_a_port_that_wont_open_says_why(self):
+        def denied(*a, **k):
+            raise OSError("permission denied")
+        d, _ = self.run_loop(denied, lambda d: "error" in d)
+        self.assertEqual((d["state"], d["error"]), ("searching", "permission denied"))
 
 
 def link_with(replies):

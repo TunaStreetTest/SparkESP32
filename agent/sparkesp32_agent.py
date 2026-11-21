@@ -18,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -37,12 +38,14 @@ log = logging.getLogger("sparkesp32")
 
 USB_VID, USB_PID = 0x303A, 0x1001     # Espressif USB-Serial/JTAG (ESP32-C6 native USB)
 HANDSHAKE = b"fw=sparkesp32"
+REJECT_S = 300.0                      # a port that fails the handshake is skipped this long
 HANDSHAKE_S = 10.0                    # keep asking a just-plugged-in board this long: it's still
                                       # booting, then its console drops input for 0.5 s
 STALE_S = 5.0                        # /stat answers 503 if the sampler is older than this
 MAX_CORES = 32                        # what the display shows; also keeps a line < 256 bytes,
                                       # the firmware console's line buffer
 GPU_STALE_S = 5.0                     # nvidia-smi values older than this are reported unknown
+GPU_STALL_S = 10.0                    # it prints a line a second: this long silent, it's hung
 NVSMI = ["nvidia-smi", "-i", "0", "--query-gpu=utilization.gpu,temperature.gpu,power.draw",
          "--format=csv,noheader,nounits", "-lms", "1000"]
 
@@ -101,13 +104,18 @@ def read_mem_mb():
 class GpuReader(threading.Thread):
     """Keeps one `nvidia-smi -lms 1000` child running and remembers its latest line.
 
-    Sampling never waits on nvidia-smi: a hung or missing nvidia-smi just makes
-    the GPU fields go stale, and stale fields are sent as unknown ("-").
+    Sampling never waits on nvidia-smi: fields older than GPU_STALE_S go out as
+    unknown ("-"). The child's state, published in /healthz as gpu_source:
+      starting     spawned, no line yet
+      streaming    a line a second
+      stalled      silent for GPU_STALL_S (a hung driver call): killed, then respawned
+      exited       it quit (gpu_error says how); respawned after a backoff
+      unavailable  it couldn't be started (gpu_error says why)
     """
 
     def __init__(self, stop):
         super().__init__(daemon=True, name="gpu")
-        self.stop, self.state = stop, "starting"
+        self.stop, self.state, self.error = stop, "starting", None
         self.reading = ((None, None, None), 0.0)   # (values, monotonic time); replaced whole
         self.first = threading.Event()             # set by the first reading
 
@@ -122,29 +130,49 @@ class GpuReader(threading.Thread):
         backoff = 1.0
         while not self.stop.is_set():
             try:
-                proc = subprocess.Popen(NVSMI, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        text=True, bufsize=1)
+                proc = subprocess.Popen(NVSMI, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except OSError as e:
-                self.state = f"nvidia-smi unavailable: {e}"
+                self.state, self.error = "unavailable", str(e)
             else:
-                self.state = "ok"
-                for line in proc.stdout:
-                    f = line.split(",")
-                    if len(f) == 3:
-                        values = (self._num(f[0]), self._num(f[1]), self._num(f[2], 10))
-                        self.reading = (values, time.monotonic())
-                        self.first.set()
+                with proc:                                 # closes its pipes on the way out
+                    self.state = "starting"
+                    if self._stream(proc):
                         backoff = 1.0
-                    if self.stop.is_set():
-                        break
-                proc.kill()
-                err = (proc.stderr.read() or "").strip().splitlines()
-                self.state = f"nvidia-smi exited ({proc.wait()}): {err[-1] if err else 'no output'}"
+                    proc.kill()
+                    code = proc.wait()
+                    if self.state != "stalled":
+                        err = proc.stderr.read().decode(errors="replace").strip().splitlines()
+                        self.state, self.error = "exited", f"exit {code}: {err[-1] if err else 'no output'}"
             if self.stop.is_set():
                 break
-            rl.warn("gpu", "%s; GPU fields show -- until it's back", self.state)
+            rl.warn("gpu", "nvidia-smi %s (%s); GPU fields show -- until it's back", self.state, self.error)
             self.stop.wait(min(backoff, 60))
             backoff *= 2
+
+    def _stream(self, proc):
+        """Take lines until the child exits, goes quiet for GPU_STALL_S, or we stop.
+        True if it gave at least one reading."""
+        fd, buf, got, heard = proc.stdout.fileno(), b"", False, time.monotonic()
+        while not self.stop.is_set():
+            if not select.select([fd], [], [], 0.5)[0]:
+                if time.monotonic() - heard > GPU_STALL_S:
+                    self.state, self.error = "stalled", f"no output for {GPU_STALL_S:.0f}s"
+                    return got
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return got                        # it exited
+            *lines, buf = (buf + chunk).split(b"\n")
+            buf = buf[-4096:]
+            for line in lines:
+                heard = time.monotonic()
+                f = line.decode(errors="replace").split(",")
+                if len(f) == 3:
+                    values = (self._num(f[0]), self._num(f[1]), self._num(f[2], 10))
+                    self.reading = (values, time.monotonic())
+                    self.state, self.error, got = "streaming", None, True
+                    self.first.set()
+        return got
 
     def latest(self):
         """(gpu_pct, temp_c, power_dw), each None when unknown or stale."""
@@ -171,7 +199,7 @@ class Sampler:
     def __init__(self, gpu):
         self.gpu, self.host = gpu, short_hostname()
         self.snap = (None, 0.0, {})          # (line, monotonic time of it, /healthz fields)
-        self.display = "not connected"
+        self.display = {"state": "searching"}    # the USB link, kept by serial_loop
         self._prev = read_cpu_times()
 
     def tick(self):
@@ -186,7 +214,7 @@ class Sampler:
                 f"{','.join(map(str, cores)) or '-'} {self.host}")
         sample = dict(host=self.host, cpu=cpu, gpu=gpu, mem_used_mb=memu, mem_total_mb=memt,
                       temp_c=temp, power_w=None if pow_dw is None else pow_dw / 10,
-                      cores=cores, gpu_source=self.gpu.state)
+                      cores=cores, gpu_source=self.gpu.state, gpu_error=self.gpu.error)
         self.snap = (line, time.monotonic(), sample)
 
     def latest(self):
@@ -258,30 +286,46 @@ def handshake(ser, timeout=HANDSHAKE_S, every=1.0):
 
 
 def serial_loop(sampler, explicit_port, stop):
-    """Push each fresh sample to the display; survive unplug/replug."""
+    """Push each fresh sample to the display; survive unplug/replug.
+
+    The link's state goes to /healthz as sampler.display = {"state": ..., ...}:
+      searching    no usable port ("error" says why if opening one failed)
+      handshaking  asking `status` on "port", for up to HANDSHAKE_S
+      streaming    pushing stat lines to "port" ("answered_in_s": handshake time)
+      rejected     "port" didn't answer as a SparkESP32: skipped until it's
+                   replugged or REJECT_S passes ("retry_in_s")
+    """
     ser, last_at, rejected = None, 0.0, {}
     while not stop.is_set():
         try:
             if ser is None:
                 now = time.monotonic()
                 # unplugging forgets a rejection, so a replug is always retried at once
-                rejected = {p: t for p, t in rejected.items() if os.path.exists(p)}
+                rejected = {p: t for p, t in rejected.items() if t > now and os.path.exists(p)}
                 ports = [explicit_port] if explicit_port else candidate_ports()
-                ports = [p for p in ports if rejected.get(p, 0) < now]
+                ports = [p for p in ports if p not in rejected]
                 if not ports:
+                    if rejected:
+                        port, until = min(rejected.items(), key=lambda kv: kv[1])
+                        sampler.display = {"state": "rejected", "port": port,
+                                           "retry_in_s": round(until - now)}
+                    else:
+                        sampler.display = {"state": "searching"}
                     stop.wait(2)
                     continue
                 port = ports[0]
+                sampler.display = {"state": "handshaking", "port": port}
                 ser = serial.Serial(port, 115200, timeout=0.2, write_timeout=1)
                 t0 = time.monotonic()
-                if not handshake(ser):
+                if not handshake(ser, HANDSHAKE_S):
                     log.warning("%s is an Espressif USB device but not a SparkESP32; ignoring it "
-                                "for 5 minutes or until it's replugged", port)
+                                "for %d minutes or until it's replugged", port, REJECT_S // 60)
                     ser.close()
-                    ser, rejected[port] = None, now + 300
+                    ser, rejected[port] = None, time.monotonic() + REJECT_S
                     continue
-                log.info("display connected on %s (answered in %.1fs)", port, time.monotonic() - t0)
-                sampler.display = f"connected on {port}"
+                took = round(time.monotonic() - t0, 1)
+                log.info("display connected on %s (answered in %.1fs)", port, took)
+                sampler.display = {"state": "streaming", "port": port, "answered_in_s": took}
             line, at, _ = sampler.latest()
             if line and at != last_at:
                 ser.write((line + "\n").encode())
@@ -299,7 +343,7 @@ def serial_loop(sampler, explicit_port, stop):
             else:
                 rl.warn("serial-open", "can't open the display's port: %s", e)
             ser = None
-            sampler.display = "not connected"
+            sampler.display = {"state": "searching", "error": str(e)}
             stop.wait(2)
 
 

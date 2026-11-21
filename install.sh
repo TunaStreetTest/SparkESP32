@@ -300,13 +300,14 @@ case "$line" in
     "stat "*) echo "    $line" ;;
     *) systemctl --no-pager --lines=15 status sparkesp32.service >&2 || true; die "the agent isn't serving /stat" ;;
 esac
-display="not connected"
+# the agent's USB link state (/healthz "display"): searching, handshaking, streaming, rejected
+link="searching"
 if [ -n "$PORT" ]; then
-    for _ in $(seq 1 10); do
-        display="$(curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/healthz" 2>/dev/null |
-                   "$PY" -c 'import json, sys; print(json.load(sys.stdin)["display"])' 2>/dev/null)" ||
-            display="not connected"
-        case "$display" in connected*) break ;; esac
+    for _ in $(seq 1 15); do          # the handshake alone may take up to 10 s
+        link="$(curl -fsS -m2 "http://127.0.0.1:$HTTP_PORT/healthz" 2>/dev/null | "$PY" -c \
+            'import json, sys; d = json.load(sys.stdin)["display"]; print(d["state"], d.get("port", ""))' \
+            2>/dev/null)" || link="searching"
+        [ "${link%% *}" = streaming ] && break
         sleep 1
     done
 fi
@@ -314,10 +315,12 @@ fi
 echo
 say "SparkESP32 $VERSION is running"
 echo "    agent:    http://$(hostname -s).local:$HTTP_PORT/stat  (and /healthz)"
-echo "    display:  $display"
-case "$display" in
-    connected*) echo "    the screen should read ONLINE via USB within a couple of seconds" ;;
-    *) echo "    plug the display into this Spark's USB-C, or put it on Wi-Fi (README)" ;;
+case "${link%% *}" in
+    streaming) echo "    display:  connected on ${link#* }"
+               echo "    the screen should read ONLINE via USB within a couple of seconds" ;;
+    rejected)  echo "    display:  ${link#* } didn't answer as a SparkESP32; replug it to retry" ;;
+    *)         echo "    display:  not connected"
+               echo "    plug the display into this Spark's USB-C, or put it on Wi-Fi (README)" ;;
 esac
 echo "    logs:     journalctl -u sparkesp32 -f"
 echo "    change:   sudo $0 --name ... | --ssids ... | --host ...   (re-run any time)"

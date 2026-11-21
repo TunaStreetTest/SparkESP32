@@ -14,6 +14,11 @@ First public release.
   - A 1 Hz HTTP poll of the Spark's agent over a LAN Wi-Fi network, with WPA2/WPA3
     and up to 4 SSIDs tried in order.
 - The display's title is the Spark's hostname, sent live by the agent, unless a name is set.
+- When the screen isn't ONLINE, its second line says why: agent stopped, Spark
+  unreachable, agent stale, joining, no network, wrong password.
+- `/healthz` reports the USB link (`display.state`: searching, handshaking, streaming,
+  rejected) and nvidia-smi's state (`gpu_source`); a hung nvidia-smi is killed and
+  restarted.
 - The `sparkesp32` agent is a systemd service that samples `nvidia-smi` and `/proc`
   once a second. It pushes samples over USB to a device that passes the
   firmware handshake, and serves `/stat` and `/healthz`.

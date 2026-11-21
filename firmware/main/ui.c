@@ -12,7 +12,6 @@
 
 #include "lvgl.h"
 
-#define STALE_MS 5000          // no sample for this long -> OFFLINE / NO WI-FI
 
 // palette
 #define C_BG     lv_color_hex(0x0A0A0A)
@@ -188,37 +187,35 @@ static void set_ring(ring_t *rg, int32_t pct, bool fresh)
     lv_obj_set_style_arc_color(rg->arc, fresh ? C_GREEN : C_TRACK, LV_PART_INDICATOR);
 }
 
+status_t ui_status(void)
+{
+    link_t link = net_link();
+    status_in_t in = {
+        .fresh = spark_age_ms() < SPARK_STALE_MS,
+        .ever_fed = g_spark.valid,
+        .source = g_spark.source,
+        .wifi_configured = net_wifi_configured(),
+        .url_configured = net_url_configured(),
+        .link = link.state,
+        .problem = link_problem(&link),
+        .feed = net_feed(),
+    };
+    return status_of(&in);
+}
+
 void ui_update(void)
 {
     char buf[32];
-    bool fresh = spark_age_ms() < STALE_MS;
+    status_t st = ui_status();                     // the header's state + reason (status.c)
+    bool fresh = st.screen == SCREEN_ONLINE;
+    lv_color_t col = fresh ? C_GREEN : st.screen == SCREEN_WAITING ? C_DIM : C_AMBER;
 
-    // liveness — tells "Spark is down" apart from "display can't reach it":
-    //   ONLINE    fresh sample (via USB or Wi-Fi)
-    //   NO WI-FI  Wi-Fi configured but not joined
-    //   SET HOST  joined Wi-Fi, but no agent URL configured
-    //   OFFLINE   transport fine (or USB-only), but the Spark stopped answering
-    //   WAITING   no Wi-Fi config and nothing on USB yet
-    const char *txt;
-    lv_color_t col;
-    if (fresh) {
-        txt = "ONLINE"; col = C_GREEN;
-    } else if (net_wifi_configured() && !net_wifi_is_connected()) {
-        txt = "NO WI-FI"; col = C_AMBER;
-    } else if (net_wifi_configured() && !net_url_configured()) {
-        txt = "SET HOST"; col = C_AMBER;
-    } else if (net_wifi_configured() || g_spark.valid) {
-        txt = "OFFLINE"; col = C_AMBER;
-    } else {
-        txt = "WAITING"; col = C_DIM;
-    }
     refresh_title();
-    lv_label_set_text(s_livetext, txt);
+    lv_label_set_text(s_livetext, st.label);
     lv_obj_set_style_text_color(s_livetext, col, 0);
     lv_obj_set_style_bg_color(s_dot, col, 0);
     lv_obj_align_to(s_dot, s_livetext, LV_ALIGN_OUT_LEFT_MID, -10, 0);   // after the text's new width
-    lv_label_set_text(s_srctext, !fresh ? "" :
-                      g_spark.source == SRC_WIFI ? "via WI-FI" : "via USB");
+    lv_label_set_text(s_srctext, st.reason);
 
     // fields are SPARK_UNKNOWN until the first sample, so no per-field `valid` checks
     set_ring(&s_cpu, g_spark.cpu, fresh);

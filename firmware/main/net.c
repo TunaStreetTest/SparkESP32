@@ -1,18 +1,20 @@
 // net — Wi-Fi transport for SparkESP32.
 //
 // One task supervises the link and polls the agent:
-//   * joins the configured SSIDs in order (rotating after 3 failed attempts),
-//     pacing attempts with exponential backoff — connects are never issued
-//     from the Wi-Fi event handler, so a dead AP can't cause a reconnect storm
+//   * the link's state machine is link.c (UNCONFIGURED, BACKOFF, JOINING,
+//     CONNECTED, SCANNING); this file feeds it Wi-Fi events and does the radio
+//     work it asks for. Joins only ever start from the supervisor's tick, never
+//     from the event handler, so a dead AP can't cause a reconnect storm
 //   * once a second, GETs the agent's /stat (skipped while a USB sample is
-//     fresh — USB always wins) and feeds the shared parser
+//     fresh: USB always wins), feeds the shared parser, and classifies how the
+//     poll went (status.c), so the screen can say why it's OFFLINE
 // The Wi-Fi driver is told to keep its config in RAM only, so the passphrase
 // lives in exactly one place: our NVS namespace (see SECURITY.md).
 
 #include "net.h"
+#include "display.h"
 #include "settings.h"
 #include "spark_data.h"
-#include "display.h"
 #include "ui.h"
 
 #include <ctype.h>
@@ -21,7 +23,6 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_event.h"
@@ -37,26 +38,16 @@ static const char *TAG = "net";
 #define SSID_MAX         32
 #define PASS_MAX         63
 #define URL_MAX          127
-#define FAILS_TO_ROTATE  3
-#define BACKOFF_MIN_MS   2000
-#define BACKOFF_MAX_MS   30000
-#define ATTEMPT_TIMEOUT_MS 20000     // no event at all for this long -> retry
-#define USB_FRESH_MS     3000        // a USB sample younger than this suppresses polling
 #define HTTP_TIMEOUT_MS  2500
-#define EV_CONNECTED     BIT0
 
-static EventGroupHandle_t s_ev;
-static SemaphoreHandle_t s_mtx;      // guards the config + supervisor state below
+static SemaphoreHandle_t s_mtx;      // guards the config, s_link and s_last_err
 static esp_netif_t *s_netif;
 
 static char s_ssids[MAX_SSIDS][SSID_MAX + 1];
-static int  s_nssids, s_cur, s_fails;
 static char s_pass[PASS_MAX + 1];
 static char s_url[URL_MAX + 1];
-
-static bool s_connecting;
-static uint32_t s_attempt_ms, s_next_try_ms, s_backoff_ms = BACKOFF_MIN_MS;
-static volatile bool s_paused;       // set while scanning
+static link_t s_link;                // the link's state machine (and the SSID count)
+static volatile feed_t s_feed;       // how the last poll went
 static char s_last_err[64];
 static unsigned s_poll_ok, s_poll_err;
 
@@ -101,8 +92,8 @@ static void load_cfg(void)
     settings_get("ssids", csv, sizeof(csv), "");
     int n = csv[0] ? split_ssids(csv, tmp) : 0;
     LOCK();
-    s_nssids = n > 0 ? n : 0;
-    if (s_cur >= s_nssids) s_cur = 0;
+    s_link.nssids = n > 0 ? n : 0;
+    if (s_link.cur >= s_link.nssids) s_link.cur = 0;
     memcpy(s_ssids, tmp, sizeof(tmp));
     memset(s_pass, 0, sizeof(s_pass));           // don't leave an old passphrase's tail in RAM
     settings_get("pass", s_pass, sizeof(s_pass), "");
@@ -110,19 +101,26 @@ static void load_cfg(void)
     UNLOCK();
 }
 
-bool net_wifi_configured(void) { return s_nssids > 0; }
+bool net_wifi_configured(void) { return s_link.nssids > 0; }
 bool net_url_configured(void) { return s_url[0] != 0; }
 
-bool net_wifi_is_connected(void)
+link_t net_link(void)
 {
-    return s_ev && (xEventGroupGetBits(s_ev) & EV_CONNECTED);
+    if (!s_mtx) return (link_t){0};            // before net_start(): unconfigured
+    LOCK();
+    link_t l = s_link;
+    UNLOCK();
+    return l;
 }
+
+bool   net_wifi_is_connected(void) { return net_link().state == LINK_CONNECTED; }
+feed_t net_feed(void) { return s_feed; }
 
 // Build the driver config for the current SSID. Caller holds s_mtx.
 static void build_config(wifi_config_t *wc)
 {
     memset(wc, 0, sizeof(*wc));
-    strlcpy((char *)wc->sta.ssid, s_ssids[s_cur], sizeof(wc->sta.ssid));
+    strlcpy((char *)wc->sta.ssid, s_ssids[s_link.cur], sizeof(wc->sta.ssid));
     strlcpy((char *)wc->sta.password, s_pass, sizeof(wc->sta.password));
     // threshold is a floor: a WPA2 floor still joins WPA3 / transition APs
     wc->sta.threshold.authmode = s_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
@@ -134,10 +132,7 @@ static void build_config(wifi_config_t *wc)
 static void restart_link(void)
 {
     LOCK();
-    s_cur = s_fails = 0;
-    s_backoff_ms = BACKOFF_MIN_MS;
-    s_next_try_ms = spark_now_ms();
-    s_connecting = false;
+    link_reset(&s_link, spark_now_ms());
     UNLOCK();
     esp_wifi_disconnect();
 }
@@ -188,30 +183,20 @@ esp_err_t net_clear(void)
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(s_ev, EV_CONNECTED);
         wifi_event_sta_disconnected_t *d = (wifi_event_sta_disconnected_t *)data;
+        int reason = d ? d->reason : 0;
         LOCK();
-        if (s_connecting) {                        // a failed attempt: keep its backoff deadline
-            s_fails++;
-            snprintf(s_last_err, sizeof(s_last_err), "join '%s' reason %d",
-                     s_nssids ? s_ssids[s_cur] : "", d ? d->reason : -1);
-        } else {
-            // A link that was up dropped (or we dropped it): retry now. This also
-            // keeps the deadline recent; one set at the last join could be over
-            // 2^31 ms old after weeks connected and wrap to "in the future".
-            s_next_try_ms = spark_now_ms();
-        }
-        s_connecting = false;
+        if (s_link.state == LINK_JOINING)
+            snprintf(s_last_err, sizeof(s_last_err), "join '%s' reason %d", s_ssids[s_link.cur], reason);
+        link_disconnected(&s_link, reason, spark_now_ms());
         UNLOCK();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         LOCK();
-        s_connecting = false;
-        s_fails = 0;
-        s_backoff_ms = BACKOFF_MIN_MS;
-        ESP_LOGI(TAG, "joined '%s', ip " IPSTR, s_ssids[s_cur], IP2STR(&e->ip_info.ip));
+        link_joined(&s_link, spark_now_ms());
+        ESP_LOGI(TAG, "joined '%s', ip " IPSTR, s_ssids[s_link.cur], IP2STR(&e->ip_info.ip));
         UNLOCK();
-        xEventGroupSetBits(s_ev, EV_CONNECTED);
+        s_feed = FEED_NONE;                        // a new link: nothing known about the agent yet
     }
 }
 
@@ -219,34 +204,23 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
 // to the driver outside it (the event handler needs the same lock).
 static void supervise_link(void)
 {
-    if (s_paused || net_wifi_is_connected()) return;
-    uint32_t now = spark_now_ms();
     wifi_config_t wc;
     LOCK();
-    if (!s_nssids ||
-        (s_connecting && (uint32_t)(now - s_attempt_ms) < ATTEMPT_TIMEOUT_MS) ||
-        (int32_t)(now - s_next_try_ms) < 0) {
-        UNLOCK();
-        return;
+    int was = s_link.cur;
+    bool join = link_tick(&s_link, spark_now_ms());
+    if (join) {
+        if (s_link.cur != was) ESP_LOGW(TAG, "trying next ssid '%s'", s_ssids[s_link.cur]);
+        build_config(&wc);
     }
-    if (s_fails >= FAILS_TO_ROTATE && s_nssids > 1) {
-        s_cur = (s_cur + 1) % s_nssids;
-        s_fails = 0;
-        ESP_LOGW(TAG, "trying next ssid '%s'", s_ssids[s_cur]);
-    }
-    build_config(&wc);
-    s_connecting = true;
-    s_attempt_ms = now;
-    s_next_try_ms = now + s_backoff_ms;
-    s_backoff_ms = s_backoff_ms * 2 > BACKOFF_MAX_MS ? BACKOFF_MAX_MS : s_backoff_ms * 2;
     UNLOCK();
+    if (!join) return;
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wc);
     if (err == ESP_OK) err = esp_wifi_connect();
     memset(&wc, 0, sizeof(wc));                    // don't leave the passphrase on the stack
     if (err != ESP_OK) {
         LOCK();
-        s_connecting = false;
+        link_join_not_started(&s_link, spark_now_ms());
         UNLOCK();
         set_err("connect %s", esp_err_to_name(err));
     }
@@ -254,9 +228,17 @@ static void supervise_link(void)
 
 // ---------------------------------------------------------------- poll
 
-// GET the agent's /stat into buf. Returns body length, or -1 (sets s_last_err).
-static int http_get(const char *url, char *buf, int cap)
+typedef struct {
+    bool connected;      // the TCP connection was made
+    int sock_errno;      // why not, if it wasn't
+    int status;          // HTTP status, 0 if none came back
+} poll_info_t;
+
+// GET the agent's /stat into buf. Returns the body length, or -1 (and sets
+// s_last_err); *pi says how far it got, for feed_classify().
+static int http_get(const char *url, char *buf, int cap, poll_info_t *pi)
 {
+    *pi = (poll_info_t){0};
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = HTTP_TIMEOUT_MS,
@@ -268,8 +250,9 @@ static int http_get(const char *url, char *buf, int cap)
     int n = -1;
     esp_err_t err = esp_http_client_open(c, 0);
     if (err == ESP_OK) {
+        pi->connected = true;
         int64_t clen = esp_http_client_fetch_headers(c);
-        int st = esp_http_client_get_status_code(c);
+        int st = pi->status = esp_http_client_get_status_code(c);
         if (st != 200) {
             set_err("http %d", st);   // 503 = agent stale
         } else if (clen <= 0 || clen >= cap) {
@@ -282,7 +265,8 @@ static int http_get(const char *url, char *buf, int cap)
             else set_err("short body %d/%lld", tot, (long long)clen);
         }
     } else {
-        set_err("connect %s", esp_err_to_name(err));
+        pi->sock_errno = esp_http_client_get_errno(c);
+        set_err("connect %s (errno %d)", esp_err_to_name(err), pi->sock_errno);
     }
     esp_http_client_close(c);
     esp_http_client_cleanup(c);
@@ -299,32 +283,31 @@ static void poll_once(void)
     if (!url[0] || !net_wifi_is_connected()) return;
 
     if (display_lock(500) != ESP_OK) return;
-    bool usb_fresh = g_spark.valid && g_spark.source == SRC_USB && spark_age_ms() < USB_FRESH_MS;
+    bool usb_fresh = g_spark.valid && g_spark.source == SRC_USB && spark_age_ms() < SPARK_USB_FRESH_MS;
     display_unlock();
     if (usb_fresh) return;                         // USB wins
 
-    if (http_get(url, body, sizeof(body)) <= 0) { s_poll_err++; return; }
-
-    char *argv[10];
-    int argc = 0;
-    char *tok = NULL;
-    for (char *t = strtok_r(body, " \t\r\n", &tok); t && argc < 10; t = strtok_r(NULL, " \t\r\n", &tok))
-        argv[argc++] = t;
-    // too many fields is usually an agent speaking an older protocol: say so plainly
-    const char *why = "too many fields: update the agent";
+    poll_info_t pi;
     int rc = -1;
-    if (argc < 10) {
-        if (display_lock(1000) != ESP_OK) { s_poll_err++; return; }
-        rc = spark_apply_args(argc, argv, SRC_WIFI, &why);
-        if (rc == 0) ui_update();
-        display_unlock();
+    if (http_get(url, body, sizeof(body), &pi) > 0) {
+        char *argv[10];
+        int argc = 0;
+        char *tok = NULL;
+        for (char *t = strtok_r(body, " \t\r\n", &tok); t && argc < 10; t = strtok_r(NULL, " \t\r\n", &tok))
+            argv[argc++] = t;
+        // too many fields is usually an agent speaking an older protocol: say so plainly
+        const char *why = "too many fields: update the agent";
+        if (argc < 10) {
+            if (display_lock(1000) != ESP_OK) { s_poll_err++; return; }
+            rc = spark_apply_args(argc, argv, SRC_WIFI, &why);
+            if (rc == 0) ui_update();
+            display_unlock();
+        }
+        if (rc != 0) set_err("bad stat line (%s)", why);
     }
-    if (rc == 0) {
-        s_poll_ok++;
-    } else {
-        s_poll_err++;
-        set_err("bad stat line (%s)", why);
-    }
+    s_feed = feed_classify(pi.connected, pi.sock_errno, pi.status, rc == 0);
+    if (rc == 0) s_poll_ok++;
+    else s_poll_err++;
 }
 
 static void net_task(void *arg)
@@ -352,7 +335,6 @@ static void purge_driver_copy(void)
 
 void net_start(void)
 {
-    s_ev = xEventGroupCreate();
     s_mtx = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -369,10 +351,13 @@ void net_start(void)
                                                         wifi_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     load_cfg();
+    LOCK();
+    link_reset(&s_link, spark_now_ms());
+    UNLOCK();
     ESP_ERROR_CHECK(esp_wifi_start());          // started even unconfigured so `wifi scan` works
     // Mains-powered display: modem power-save only adds RX latency spikes.
     esp_wifi_set_ps(WIFI_PS_NONE);
-    ESP_LOGI(TAG, "wifi up: %d ssid(s), url %s", s_nssids, s_url[0] ? s_url : "(unset)");
+    ESP_LOGI(TAG, "wifi up: %d ssid(s), url %s", s_link.nssids, s_url[0] ? s_url : "(unset)");
 
     xTaskCreatePinnedToCore(net_task, "net", 8192, NULL, 4, NULL, 0);
 }
@@ -390,13 +375,18 @@ void net_show(void)
         wifi_ap_record_t ap;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
     }
+    uint32_t now = spark_now_ms();
     LOCK();
+    const link_t *l = &s_link;
     printf("NET-BEGIN\n");
-    printf("configured=%d connected=%d cur='%s' ip=%s rssi=%d\n", s_nssids > 0,
-           net_wifi_is_connected(), s_nssids ? s_ssids[s_cur] : "", ip, rssi);
+    printf("configured=%d connected=%d cur='%s' ip=%s rssi=%d\n", l->nssids > 0,
+           l->state == LINK_CONNECTED, l->nssids ? s_ssids[l->cur] : "", ip, rssi);
     printf("ssids=");
-    for (int i = 0; i < s_nssids; i++) printf("%s%s", i ? "," : "", s_ssids[i]);
+    for (int i = 0; i < l->nssids; i++) printf("%s%s", i ? "," : "", s_ssids[i]);
     printf(" pass=%s url=%s\n", s_pass[0] ? "set" : "unset", s_url[0] ? s_url : "unset");
+    printf("link state=%s for_ms=%lu fails=%d reason=%d retry_in_ms=%ld feed=%s\n",
+           link_state_name(l->state), (unsigned long)(now - l->since_ms), l->fails, l->reason,
+           l->state == LINK_BACKOFF ? (long)(int32_t)(l->next_try_ms - now) : -1L, feed_name(s_feed));
     printf("poll ok=%u err=%u last_err='%s'\n", s_poll_ok, s_poll_err, s_last_err);
     printf("NET-END\n");
     UNLOCK();
@@ -418,7 +408,9 @@ static const char *auth_name(wifi_auth_mode_t m)
 
 esp_err_t net_scan_print(void)
 {
-    s_paused = true;
+    LOCK();
+    link_scan(&s_link, spark_now_ms());            // the supervisor keeps off the radio
+    UNLOCK();
     esp_wifi_disconnect();
     vTaskDelay(pdMS_TO_TICKS(300));
     wifi_scan_config_t sc = { .show_hidden = true };
@@ -440,7 +432,6 @@ esp_err_t net_scan_print(void)
     } else {
         printf("ERR scan %s\nSCAN-END\n", esp_err_to_name(err));
     }
-    restart_link();
-    s_paused = false;
+    restart_link();                                // back to BACKOFF, rejoining now
     return err;
 }

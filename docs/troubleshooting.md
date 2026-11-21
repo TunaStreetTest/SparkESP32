@@ -34,24 +34,34 @@ can talk to the display's serial port at a time.
 Nothing has arrived over USB yet.
 
 - `systemctl status sparkesp32`. If it isn't running, `journalctl -u sparkesp32` says why.
-- `/healthz` → `"display"`:
-  - `not connected`: the agent can't see a SparkESP32 on USB. Make sure no other
-    program has the port open (`screen`, `minicom`, `devctl.py`, an IDE monitor)
-    with `sudo fuser -v /dev/ttyACM*`. Then re-run `sudo ./install.sh`, which also
-    reflashes if the board isn't running SparkESP32.
-  - The log says `is an Espressif USB device but not a SparkESP32`: the board didn't
-    answer the handshake as SparkESP32 within 10 s. Unplug it and plug it back in (the
-    agent retries a replugged board at once). If it still says that, it's running
-    different firmware: re-run `sudo ./install.sh` to flash it.
+- `/healthz` → `"display"` → `"state"`:
+  - `searching`: the agent can't see the board on USB. An `"error"` says why opening a
+    port failed. Make sure no other program has the port open (`screen`, `minicom`,
+    `devctl.py`, an IDE monitor) with `sudo fuser -v /dev/ttyACM*`. Then re-run
+    `sudo ./install.sh`, which also reflashes if the board isn't running SparkESP32.
+  - `handshaking`: it's asking the board who it is (up to 10 s after it's plugged in).
+  - `rejected`: the board on `"port"` didn't answer as SparkESP32 within 10 s, so the
+    agent skips it for `"retry_in_s"` more seconds. Unplug it and plug it back in (a
+    replugged board is retried at once). If it's rejected again, it's running different
+    firmware: re-run `sudo ./install.sh` to flash it.
+  - `streaming`: all good; `"answered_in_s"` is how long the board took to answer.
 - ModemManager probing the port garbles the console. The installer's udev rule stops that.
   Check it's present: `cat /etc/udev/rules.d/99-sparkesp32.rules`.
 
 ## OFFLINE
 
-The link is up but samples stopped. The Spark is asleep or off, or the agent is down.
+The link is up but samples stopped. The screen's second line says why (over Wi-Fi):
 
-- Over USB: the agent stopped (`systemctl status sparkesp32`) or the Spark is off.
-- Over Wi-Fi: run `devctl.py wifi` on a machine the board is plugged into and read `last_err`:
+| Second line | Meaning | Fix |
+|---|---|---|
+| agent stopped | the Spark refused the connection: nothing listens on :8787 | `systemctl status sparkesp32`; `sudo systemctl restart sparkesp32` |
+| Spark unreachable | no answer, or `<host>.local` doesn't resolve | is the Spark on? Same LAN? Try `--host <ip>`; is ufw allowing your subnet? |
+| agent stale | HTTP 503: the agent is up but its sampler stalled | `journalctl -u sparkesp32` |
+| bad reply | another service answers, or an old agent | check the URL (`devctl.py wifi`); update the agent |
+
+- Over USB there is no second line: the agent stopped (`systemctl status sparkesp32`) or the Spark is off.
+- For the raw details, run `devctl.py wifi` on a machine the board is plugged into. Its
+  `link` line shows the link state and the last poll (`feed=`), and `last_err` the exact error:
 
 | `last_err` | Meaning | Fix |
 |---|---|---|
@@ -66,7 +76,9 @@ print one `stat ...` line.
 
 ## NO WI-FI
 
-Wi-Fi is configured but the board can't join. `devctl.py wifi` shows `last_err` as
+Wi-Fi is configured but the board can't join. The second line is `joining...` while it
+tries, then `no network` (reason 201/212), `wrong password` (15/202/204) or `can't join`
+(anything else). `devctl.py wifi` shows the `link` state and `last_err` as
 `join '<ssid>' reason <n>`:
 
 | reason | Meaning | Usually |
@@ -89,12 +101,15 @@ or `--host <ip>`.
 
 ## GPU, temperature or power show `--`
 
-The agent couldn't read them from `nvidia-smi`. Check `/healthz` → `"gpu_source"`:
+The agent couldn't read them from `nvidia-smi`. Check `/healthz` → `"gpu_source"`
+(and `"gpu_error"` for the details):
 
-- `nvidia-smi unavailable`: the NVIDIA driver/tools aren't installed or aren't on `PATH`
-  for the service.
-- `nvidia-smi exited (...)`: it crashed or the driver isn't loaded; `nvidia-smi` by hand
-  will say why. The agent restarts it with backoff.
+- `unavailable`: the NVIDIA driver/tools aren't installed or aren't on `PATH` for the
+  service.
+- `exited`: it crashed or the driver isn't loaded; `nvidia-smi` by hand will say why.
+  The agent restarts it with backoff.
+- `stalled`: it stopped printing without exiting (a hung driver call). The agent kills
+  and restarts it; if this keeps happening, the driver itself is stuck.
 
 CPU, memory and the core heatmap don't depend on `nvidia-smi`.
 

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "ui.c" "spark_data.c" "settings.c" "net.c" "console_cmds.c"
+    SRCS "main.c" "ui.c" "spark_data.c" "settings.c" "net.c" "console_cmds.c" "link.c" "status.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         board

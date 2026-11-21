@@ -5,6 +5,8 @@
 //   url   : the agent's endpoint, e.g. http://spark-ab12.local:8787/stat
 #include <stdbool.h>
 #include "esp_err.h"
+#include "link.h"
+#include "status.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,9 +14,11 @@ extern "C" {
 
 void      net_start(void);          // after settings_init(); starts the supervisor/poll task
 
-bool net_wifi_configured(void);     // at least one SSID
-bool net_wifi_is_connected(void);
-bool net_url_configured(void);
+bool   net_wifi_configured(void);   // at least one SSID
+bool   net_wifi_is_connected(void);
+bool   net_url_configured(void);
+link_t net_link(void);              // a snapshot of the link's state machine
+feed_t net_feed(void);              // how the last /stat poll went
 
 // Console setters: validate, persist, apply. Return ESP_ERR_INVALID_ARG on bad input.
 esp_err_t net_set_ssids(const char *csv);

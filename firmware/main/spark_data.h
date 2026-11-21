@@ -18,6 +18,14 @@ extern "C" {
 #define SPARK_UNKNOWN   INT32_MIN    // a field the host couldn't measure
 #define SPARK_HOST_MAX  63           // RFC 1123 label length
 
+// The two clocks of the USB -> Wi-Fi handover. When USB samples stop, Wi-Fi
+// polling resumes after SPARK_USB_FRESH_MS and has until SPARK_STALE_MS, when the
+// screen stops saying ONLINE, for its first sample to land.
+#define SPARK_USB_FRESH_MS 3000      // a USB sample this fresh suppresses Wi-Fi polling
+#define SPARK_STALE_MS     5000      // no sample for this long: no longer ONLINE
+_Static_assert(SPARK_USB_FRESH_MS < SPARK_STALE_MS,
+               "Wi-Fi polling must resume before the screen gives up on a quiet USB feed");
+
 typedef enum { SRC_NONE = 0, SRC_USB, SRC_WIFI } spark_src_t;
 
 typedef struct {

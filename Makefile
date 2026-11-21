@@ -46,6 +46,9 @@ check:
 	$(CC) -std=c11 -Wall -Wextra -Werror -Itests/stubs -Ifirmware/main \
 	   tests/test_parser.c firmware/main/spark_data.c -o tests/.build/test_parser
 	tests/.build/test_parser
+	$(CC) -std=c11 -Wall -Wextra -Werror -Ifirmware/main \
+	   tests/test_states.c firmware/main/link.c firmware/main/status.c -o tests/.build/test_states
+	tests/.build/test_states
 	@grep -q '^__version__ = "$(VERSION)"$$' agent/sparkesp32_agent.py \
 	   || { echo "agent __version__ != VERSION ($(VERSION))"; exit 1; }
 	@if command -v ruff >/dev/null; then ruff check agent tools tests; \
