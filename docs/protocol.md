@@ -61,7 +61,7 @@ Before writing anything, a host must confirm it's talking to SparkESP32 firmware
 
 ```
 STATUS-BEGIN
-fw=sparkesp32 version=0.1.0 idf=v5.5.6 board=waveshare-esp32c6-amoled-2.16
+fw=sparkesp32 version=1.0.0 idf=v5.5.6 board=waveshare-esp32c6-amoled-2.16
 name='Lab Spark' rot=cw
 heap_free=81160 min=72272
 stack_free repl=6344 net=7428 tick=4852

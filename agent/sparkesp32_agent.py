@@ -33,7 +33,7 @@ try:
 except ImportError:  # HTTP-only mode
     serial = None
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 log = logging.getLogger("sparkesp32")
 
 USB_VID, USB_PID = 0x303A, 0x1001     # Espressif USB-Serial/JTAG (ESP32-C6 native USB)
