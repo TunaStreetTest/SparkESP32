@@ -23,7 +23,8 @@ Fetched at build time by the ESP-IDF component manager (pinned per board in
 | [esp_lvgl_adapter](https://components.espressif.com/components/espressif/esp_lvgl_adapter) (Espressif) | 0.7.9 | Apache-2.0. ESP32-C6 AMOLED only |
 | [esp_lcd_sh8601](https://components.espressif.com/components/espressif/esp_lcd_sh8601) (Espressif) | 2.0.1 | Apache-2.0. ESP32-C6 AMOLED only |
 | [esp_lcd_ili9341](https://components.espressif.com/components/espressif/esp_lcd_ili9341) (Espressif) | 2.1.0 | Apache-2.0. ES3C28P only |
-| [cmake_utilities](https://components.espressif.com/components/espressif/cmake_utilities) (Espressif) | 0.5.3 | Apache-2.0. Build-time CMake helpers the two panel drivers use; no code in the image |
+| [esp_lcd_co5300](https://components.espressif.com/components/espressif/esp_lcd_co5300) (Espressif) | 2.2.0 | Apache-2.0. ESP32-S3 AMOLED 1.8 only |
+| [cmake_utilities](https://components.espressif.com/components/espressif/cmake_utilities) (Espressif) | 0.5.3 | Apache-2.0. Build-time CMake helpers the panel drivers use; no code in the image |
 
 The ESP32-S3 reflective-LCD build uses only ESP-IDF and LVGL from this table.
 
@@ -78,6 +79,7 @@ project, and owes a lot to the people who published those facts.
 |---|---|
 | Waveshare ESP32-C6-Touch-AMOLED-2.16 | Waveshare's [documentation](https://docs.waveshare.com/ESP32-C6-Touch-AMOLED-2.16) and schematic. The USB start-up workaround follows [espressif/esp-idf#17432](https://github.com/espressif/esp-idf/issues/17432) and its reporters' analysis |
 | LCDWiki 2.8inch ESP32-S3 Display (ES3C28P) | LCDWiki's [pin table and ILI9341V init code](https://www.lcdwiki.com/2.8inch_ESP32-S3_Display), used for the pins and the panel's power, VCOM and gamma values. No code was copied |
+| Waveshare ESP32-S3-Touch-AMOLED-1.8 (V2) | The [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) board file for this hardware (`main/boards/waveshare/esp32-s3-touch-amoled-1.8-v2/`, MIT) for the pins, the CO5300 init sequence, the column offset and the AXP2101 register values. Facts only: no code was copied |
 | Waveshare ESP32-S3-RLCD-4.2 | Waveshare's [documentation](https://docs.waveshare.com/ESP32-S3-RLCD-4.2) and [ESP-IDF examples](https://github.com/waveshareteam/ESP32-S3-RLCD-4.2) (Apache-2.0), and the [Zephyr project's devicetree](https://github.com/zephyrproject-rtos/zephyr/tree/main/boards/waveshare/esp32s3_rlcd_4_2) for the board (Apache-2.0), for the ST7306 register values. No code was copied |
 | Elecrow CrowPanel ESP32 4.2" E-Paper (V1.2) | Elecrow's [V1.2 Arduino examples, ESPHome component and factory image](https://github.com/Elecrow-RD/CrowPanel-ESP32-4.2-E-paper-HMI-Display-with-400-300) (no license stated) for the pins, the panel setup and the DU/GC waveform values. Facts only: no code was copied |
 | Elecrow CrowPanel ESP32 5.79" E-Paper | Elecrow's [factory source and schematic](https://github.com/Elecrow-RD/CrowPanel-ESP32-5.79-E-paper-HMI-Display-with-272-792) (no license stated) for the pins and the panel power switch; [esphome-crowpanel-579](https://github.com/samperk1/esphome-crowpanel-579) by Sam Perkins (MIT) for the two controllers' RAM windows and the seam; [GxEPD2](https://github.com/ZinggJM/GxEPD2)'s GDEY0579T93 driver by Jean-Marc Zingg (GPL-3.0) and Solomon Systech's SSD1683 datasheet for the refresh commands. Facts only: no code was copied |

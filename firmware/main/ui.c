@@ -108,6 +108,33 @@ static const layout_t LAYOUTS[] = {{
     .tile_radius = 10, .tile_pad = 12, .tile_label_y = 8, .tile_value_y = -8,
     .tile_label_font = &lv_font_montserrat_16, .tile_value_font = &lv_font_montserrat_36,
 }};
+#elif BOARD_UI_W == 448 && BOARD_UI_H == 368      // 1.8" AMOLED (the S3 V2): landscape, or portrait
+// A tile is as wide as "140.0 W" in 36 px (144) plus its padding.
+static const layout_t LAYOUTS[] = {{
+    // landscape (rot cw or ccw): the 4.2" layout with more room under the rings
+    .w = 448, .h = 368,
+    .margin = 16, .title_y = 10, .title_w = 270, .title_font = &lv_font_montserrat_28,
+    .status_y = 14, .reason_y = 36, .dot = 12,
+    .ring_r = 60, .ring_w = 9, .ring_cx = {80, 224, 368}, .ring_cy = {134, 134, 134},
+    .ring_val_dy = -6, .ring_sub_dy = 16, .ring_title_dy = -7, .ring_val_font = &lv_font_montserrat_28,
+    .ring_sub_font = &lv_font_montserrat_14, .gpu_mhz_fmt = "%d MHz",
+    .cores_y = 206, .cells_y = 226, .cells_h = 26, .cells_gap = 3,
+    .tile_x = {16, 230}, .tile_y = {266, 266}, .tile_w = 202, .tile_h = 90,
+    .tile_radius = 12, .tile_pad = 14, .tile_label_y = 8, .tile_value_y = -8,
+    .tile_label_font = &lv_font_montserrat_16, .tile_value_font = &lv_font_montserrat_36,
+}, {
+    // portrait (rot none): the panel's own way up; the C6's arrangement, narrower
+    .w = 368, .h = 448,
+    .margin = 14, .title_y = 12, .title_w = 205, .title_font = &lv_font_montserrat_24,
+    .status_y = 14, .reason_y = 36, .dot = 12,
+    .ring_r = 52, .ring_w = 7, .ring_cx = {66, 184, 302}, .ring_cy = {124, 124, 124},
+    .ring_val_dy = -5, .ring_sub_dy = 14, .ring_title_dy = 21, .ring_val_font = &lv_font_montserrat_28,
+    .ring_sub_font = &lv_font_montserrat_14, .gpu_mhz_fmt = "%d MHz",
+    .cores_y = 214, .cells_y = 236, .cells_h = 40, .cells_gap = 2,
+    .tile_x = {14, 188}, .tile_y = {296, 296}, .tile_w = 166, .tile_h = 138,
+    .tile_radius = 12, .tile_pad = 10, .tile_label_y = 12, .tile_value_y = -12,
+    .tile_label_font = &lv_font_montserrat_16, .tile_value_font = &lv_font_montserrat_36,
+}};
 #else
 #error "no UI layout for this board's BOARD_UI_W x BOARD_UI_H: add one here (docs/adding-a-device.md)"
 #endif
