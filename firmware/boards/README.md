@@ -34,7 +34,7 @@ A board directory holds:
 | `README.md` | hardware notes: pins, sources, quirks, and what has been verified on the real thing |
 | `elecrow-esp32s3-epaper-5.79` | ESP32-S3 | 5.79" 792×272 e-paper, black and white, two SSD1683s, wide or tall; USB through a CH340 | Verified on hardware. The e-paper example: partial refresh, a slower cadence, two canvas shapes, a USB-UART bridge |
 | `elecrow-esp32s3-epaper-4.2` | ESP32-S3 | 4.2" 400×300 e-paper, black and white, an UltraChip-style controller (V1.2 boards only); USB through a CH340C | Verified on hardware. The 5.79"'s refresh policy on another controller family |
-| `waveshare-esp32s3-amoled-1.8-v2` | ESP32-S3 | 1.8" 368×448 AMOLED, color (CO5300), landscape or portrait; V2 hardware only | Runs on hardware over USB from a Spark; the screen itself not yet looked at. A rectangular panel the controller can't rotate: both shapes, turned in the flush |
+| `waveshare-esp32s3-amoled-1.8-v2` | ESP32-S3 | 1.8" 368×448 AMOLED, color (CO5300), landscape or portrait; V2 hardware only | Verified on hardware, over USB from a Spark. A rectangular panel the controller can't rotate: both shapes, turned in the flush |
 
 `make check` runs `tools/check_boards.py`, which checks all of the above, plus that the
 README has a **Verified** section and the board has its screenshot.

@@ -66,6 +66,8 @@ On the real board, 2026-11-23 (firmware 1.4.1, ESP-IDF 5.5.6), driven from a DGX
 - a reflash keeps the name and the rotation
 - the installer on the Spark (`--no-flash`, on a board already flashed): the agent
   streams over USB and `/healthz` reads `"state": "streaming"`
+- the physical screen, looked at by a person, in landscape (`rot cw`): lit, upright,
+  showing the live UI, ONLINE via USB
 
-Not yet: the physical screen looked at by a person, a cold plug-in, Wi-Fi, and the
-installer flashing a board that still has other firmware (`--board`).
+Not yet: a look at the physical screen in `rot ccw` and in portrait, a cold plug-in,
+Wi-Fi, and the installer flashing a board that still has other firmware (`--board`).
